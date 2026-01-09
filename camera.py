@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from glob import glob as _glob
 from pathlib import Path
 from typing import List, Tuple
 
@@ -17,7 +18,53 @@ class CameraCalibration:
 
 
 def expand_image_glob(glob_pattern: str) -> List[str]:
-    return [str(p) for p in sorted(Path().glob(glob_pattern)) if p.is_file()]
+    """
+    Expand a glob pattern into a sorted list of files.
+
+    Notes (Windows-friendly):
+    - Works regardless of the current working directory by resolving relative patterns
+      relative to the project root (directory containing this file).
+    - If an absolute pattern is provided, it is used as-is.
+    """
+    pat = Path(glob_pattern)
+    if pat.is_absolute():
+        matches = _glob(str(pat), recursive=True)
+    else:
+        root = Path(__file__).resolve().parent
+        matches = _glob(str(root / glob_pattern), recursive=True)
+
+    files = [str(Path(m)) for m in matches if Path(m).is_file()]
+    return sorted(files)
+
+
+def _looks_like_heic(path: str) -> bool:
+    """
+    Detect HEIC/HEIF files by checking the ISO BMFF 'ftyp' brand in the header.
+    Many phone exports end up as HEIC but get renamed to .JPG; OpenCV can't decode HEIC.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(64)
+        return b"ftypheic" in head or b"ftypheif" in head or b"ftypmif1" in head
+    except Exception:
+        return False
+
+
+def _imread_any(path: str):
+    """
+    Robust image read on Windows (handles some path quirks).
+    Returns BGR image or None.
+    """
+    img = cv2.imread(path)
+    if img is not None:
+        return img
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+        if data.size == 0:
+            return None
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
 
 
 def save_calibration_npz(path: str, calib: CameraCalibration) -> None:
@@ -60,14 +107,21 @@ def calibrate_from_chessboard_images(
     objpoints = []
     imgpoints = []
     image_size_wh = None
+    heic_like = 0
+    unreadable = 0
 
     find_flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
     term = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-3)
 
     for p in image_paths:
-        img = cv2.imread(p)
+        img = _imread_any(p)
         if img is None:
-            print(f"[calib] skip unreadable: {p}")
+            unreadable += 1
+            if _looks_like_heic(p):
+                heic_like += 1
+                print(f"[calib] skip (HEIC renamed as JPG; convert to real JPEG): {p}")
+            else:
+                print(f"[calib] skip unreadable: {p}")
             continue
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -98,7 +152,15 @@ def calibrate_from_chessboard_images(
         cv2.destroyAllWindows()
 
     if image_size_wh is None or len(objpoints) < 3:
-        raise RuntimeError(f"Not enough valid views. Got {len(objpoints)} (need >= 3).")
+        msg = f"Not enough valid views. Got {len(objpoints)} (need >= 3)."
+        if unreadable > 0:
+            msg += f" Unreadable files: {unreadable}."
+        if heic_like > 0:
+            msg += (
+                f" Detected {heic_like} HEIC/HEIF files renamed as .jpg/.JPG. "
+                f"OpenCV can't decode HEIC—convert them to real JPEG."
+            )
+        raise RuntimeError(msg)
 
     rms, K, dist, _rvecs, _tvecs = cv2.calibrateCamera(
         objpoints, imgpoints, image_size_wh, None, None

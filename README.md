@@ -56,11 +56,11 @@ Camera modeling and pose estimation (Part 2).
 Responsibilities:
 - Camera calibration using a chessboard
 - Load and store camera intrinsics and distortion coefficients
-- Estimate planar pose using solvePnP
+ - (Used by Part 2) Provide intrinsics/distortion for pose estimation
 
 Outputs:
-- Rotation vector (rvec)
-- Translation vector (tvec)
+- Camera intrinsics matrix K
+- Distortion coefficients
 
 --------------------------------------------------
 
@@ -74,6 +74,22 @@ Responsibilities:
 - Handle basic depth ordering if needed
 
 This module assumes a valid pose and camera model are provided.
+
+--------------------------------------------------
+
+## Implemented Parts
+
+### Part 1
+- Run: `python main.py --part 1`
+- Output: `outputs/videos/part1.mp4`
+
+### Part 2
+- Run calibration + cube: `python main.py --part 2 --mode both`
+- Run only calibration: `python main.py --part 2 --mode calib`
+- Run only cube (requires existing calibration): `python main.py --part 2 --mode cube`
+- Outputs:
+  - `outputs/camera/calibration.npz`
+  - `outputs/videos/part2_cube.mp4`
 
 --------------------------------------------------
 

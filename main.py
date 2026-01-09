@@ -4,10 +4,20 @@ import argparse
 import cv2
 import numpy as np
 
-from config import Part1Config, Part2Config
+from config import Part1Config, Part2Config, Part3Config
 from tracker import PlanarTracker, warp_and_overlay
 from camera import calibrate_from_chessboard_images, expand_image_glob, save_calibration_npz, load_calibration_npz
-from ar_render import draw_cube, make_cube_points, make_plane_object_points, scale_K_to_new_size
+from ar_render import (
+    draw_cube,
+    draw_mesh_flat,
+    draw_mesh_wireframe,
+    load_mesh_trimesh,
+    make_cube_points,
+    make_demo_tetrahedron,
+    make_plane_object_points,
+    scale_K_to_new_size,
+    transform_mesh_to_plane,
+)
 
 
 def run_part1(cfg: Part1Config):
@@ -116,8 +126,8 @@ def run_part2_cube(cfg: Part2Config, tracker_cfg: Part1Config):
         raise FileNotFoundError(f"Could not read: {cfg.reference_path}")
 
     calib = load_calibration_npz(cfg.calib_output_path)
-    K_calib = calib.K
-    dist = calib.dist
+    K_calib = np.asarray(calib.K, dtype=np.float64).reshape(3, 3)
+    dist = np.asarray(calib.dist, dtype=np.float64).reshape(-1, 1)  # always (N,1)
 
     cap = cv2.VideoCapture(cfg.video_path)
     if not cap.isOpened():
@@ -131,6 +141,7 @@ def run_part2_cube(cfg: Part2Config, tracker_cfg: Part1Config):
     K = K_calib
     if calib.image_size != (out_w, out_h):
         K = scale_K_to_new_size(K_calib, calib.image_size, (out_w, out_h))
+    K = np.asarray(K, dtype=np.float64).reshape(3, 3)
 
     # Plane dimensions in world units (Z=0).
     ref_h, ref_w = ref.shape[:2]
@@ -138,7 +149,7 @@ def run_part2_cube(cfg: Part2Config, tracker_cfg: Part1Config):
     plane_w = float(cfg.plane_width)
     plane_h = float(cfg.plane_width) * ref_aspect
 
-    obj_plane = make_plane_object_points(plane_w, plane_h)
+    obj_plane = np.ascontiguousarray(make_plane_object_points(plane_w, plane_h), dtype=np.float64).reshape(-1, 3)
     cube_3d = make_cube_points(
         plane_w=plane_w,
         plane_h=plane_h,
@@ -164,12 +175,23 @@ def run_part2_cube(cfg: Part2Config, tracker_cfg: Part1Config):
         out = frame
 
         if corners is not None:
-            img_pts = corners.reshape(-1, 2).astype(np.float32)
-            ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=cv2.SOLVEPNP_ITERATIVE)
-            if ok_pnp:
-                pose_ok += 1
-                imgpts, _ = cv2.projectPoints(cube_3d, rvec, tvec, K, dist)
-                out = draw_cube(out, imgpts.reshape(-1, 2))
+            img_pts = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
+
+            # Guard against bad/empty corners arrays (avoid OpenCV assertion crashes)
+            if img_pts.shape != (4, 2) or not np.isfinite(img_pts).all():
+                pass
+            else:
+                try:
+                    ok_pnp, rvec, tvec = cv2.solvePnP(
+                        obj_plane, img_pts, K, dist, flags=cv2.SOLVEPNP_ITERATIVE
+                    )
+                except cv2.error:
+                    ok_pnp = False
+
+                if ok_pnp:
+                    pose_ok += 1
+                    imgpts, _ = cv2.projectPoints(cube_3d, rvec, tvec, K, dist)
+                    out = draw_cube(out, imgpts.reshape(-1, 2))
 
         if cfg.draw_debug_text:
             cv2.putText(
@@ -194,9 +216,139 @@ def run_part2_cube(cfg: Part2Config, tracker_cfg: Part1Config):
     print("Pose success rate:", pose_ok, "/", frame_i)
 
 
+def run_part3_model(cfg: Part3Config, tracker_cfg: Part1Config):
+    """
+    Part 3 runner:
+    Track planar marker -> solvePnP -> project + render a 3D mesh (wireframe) -> write output video.
+    """
+    if not os.path.exists(cfg.calib_output_path):
+        raise FileNotFoundError(
+            f"Calibration file not found: {cfg.calib_output_path}\n"
+            f"Run Part 2 calibration first: python main.py --part 2 --mode calib"
+        )
+
+    ref = cv2.imread(cfg.reference_path)
+    if ref is None:
+        raise FileNotFoundError(f"Could not read: {cfg.reference_path}")
+
+    calib = load_calibration_npz(cfg.calib_output_path)
+    K_calib = np.asarray(calib.K, dtype=np.float64).reshape(3, 3)
+    dist = np.asarray(calib.dist, dtype=np.float64).reshape(-1, 1)
+
+    cap = cv2.VideoCapture(cfg.video_path)
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Could not open: {cfg.video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    out_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    out_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    K = K_calib
+    if calib.image_size != (out_w, out_h):
+        K = scale_K_to_new_size(K_calib, calib.image_size, (out_w, out_h))
+    K = np.asarray(K, dtype=np.float64).reshape(3, 3)
+
+    # Plane dimensions
+    ref_h, ref_w = ref.shape[:2]
+    ref_aspect = ref_h / float(ref_w)
+    plane_w = float(cfg.plane_width)
+    plane_h = float(cfg.plane_width) * ref_aspect
+    obj_plane = np.ascontiguousarray(make_plane_object_points(plane_w, plane_h), dtype=np.float64).reshape(-1, 3)
+
+    # Load mesh (or demo)
+    if cfg.model_path and os.path.exists(cfg.model_path):
+        v, f, face_colors = load_mesh_trimesh(cfg.model_path)
+    else:
+        v, f = make_demo_tetrahedron()
+        face_colors = None
+
+    # Downsample faces for speed if needed.
+    # IMPORTANT: don't take the first N faces (it shows only a "piece" of the model).
+    # Instead, sample faces across the whole mesh so the shape stays recognizable.
+    if cfg.max_faces and int(cfg.max_faces) > 0 and f.shape[0] > int(cfg.max_faces):
+        rng = np.random.default_rng(0)
+        idx = rng.choice(f.shape[0], size=int(cfg.max_faces), replace=False)
+        f = f[idx]
+        if face_colors is not None and face_colors.shape[0] >= idx.max() + 1:
+            face_colors = face_colors[idx]
+
+    v_plane = transform_mesh_to_plane(
+        v,
+        plane_w=plane_w,
+        plane_h=plane_h,
+        scale_frac=cfg.model_scale_frac,
+        offset_x_frac=cfg.model_offset_x_frac,
+        offset_y_frac=cfg.model_offset_y_frac,
+        z_up=True,
+        rotate_x_deg=cfg.rotate_x_deg,
+        rotate_y_deg=cfg.rotate_y_deg,
+        rotate_z_deg=cfg.rotate_z_deg,
+    )
+
+    os.makedirs(os.path.dirname(cfg.output_path), exist_ok=True)
+    writer = cv2.VideoWriter(cfg.output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (out_w, out_h))
+
+    tracker = PlanarTracker(ref, tracker_cfg)
+    frame_i = 0
+    pose_ok = 0
+
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        H, corners, dbg = tracker.track(frame)
+        out = frame
+
+        if corners is not None:
+            img_pts = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
+            if img_pts.shape == (4, 2) and np.isfinite(img_pts).all():
+                try:
+                    ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=cv2.SOLVEPNP_ITERATIVE)
+                except cv2.error:
+                    ok_pnp = False
+
+                if ok_pnp:
+                    pose_ok += 1
+                    proj, _ = cv2.projectPoints(v_plane, rvec, tvec, K, dist)
+                    verts2d = proj.reshape(-1, 2)
+                    # Painter's algorithm using vertex depths in camera coordinates (far -> near)
+                    R, _ = cv2.Rodrigues(rvec)
+                    cam = (R @ v_plane.T + tvec).T
+                    z = cam[:, 2]
+                    face_depth = z[f].mean(axis=1)
+                    order = np.argsort(face_depth)[::-1]
+
+                    if face_colors is not None:
+                        out = draw_mesh_flat(out, verts2d, f, face_colors, order=order)
+                    else:
+                        out = draw_mesh_wireframe(out, verts2d, f, color=(0, 255, 255), thickness=1)
+
+        if cfg.draw_debug_text:
+            cv2.putText(
+                out,
+                f"good={dbg['good']} inliers={dbg['inliers']} pose_ok={pose_ok}/{max(1, frame_i+1)}",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 0, 255),
+                2,
+            )
+
+        writer.write(out)
+        frame_i += 1
+        if frame_i % 60 == 0:
+            print(f"[model] frames={frame_i} pose_ok={pose_ok}")
+
+    cap.release()
+    writer.release()
+    cv2.destroyAllWindows()
+    print("Saved:", cfg.output_path)
+    print("Pose success rate:", pose_ok, "/", frame_i)
+
 def parse_args():
     p = argparse.ArgumentParser(description="Project 2 runner (Parts 1-5).")
-    p.add_argument("--part", type=int, default=1, choices=[1, 2], help="Which part to run (implemented: 1-2).")
+    p.add_argument("--part", type=int, default=1, choices=[1, 2, 3], help="Which part to run (implemented: 1-3).")
     p.add_argument("--mode", type=str, default="both", choices=["calib", "cube", "both"],
                    help="Part 2 mode: calibrate intrinsics, render cube, or both.")
 
@@ -217,6 +369,17 @@ def parse_args():
     p.add_argument("--cube_offset_x_frac", type=float, default=None, help="Cube X offset fraction on plane")
     p.add_argument("--cube_offset_y_frac", type=float, default=None, help="Cube Y offset fraction on plane")
     p.add_argument("--cube_height_frac", type=float, default=None, help="Cube height as fraction of cube size")
+
+    # Part 3 args (mesh)
+    p.add_argument("--model_path", type=str, default=None, help="Path to .obj/.ply model (Part 3)")
+    p.add_argument("--model_out", type=str, default=None, help="Output video path for Part 3")
+    p.add_argument("--model_scale_frac", type=float, default=None, help="Model scale as fraction of plane width")
+    p.add_argument("--model_offset_x_frac", type=float, default=None, help="Model X offset fraction on plane")
+    p.add_argument("--model_offset_y_frac", type=float, default=None, help="Model Y offset fraction on plane")
+    p.add_argument("--max_faces", type=int, default=None, help="Max faces to render (wireframe) for speed")
+    p.add_argument("--rotate_x_deg", type=float, default=None, help="Rotate model around X before placement (degrees)")
+    p.add_argument("--rotate_y_deg", type=float, default=None, help="Rotate model around Y before placement (degrees)")
+    p.add_argument("--rotate_z_deg", type=float, default=None, help="Rotate model around Z before placement (degrees)")
     return p.parse_args()
 
 
@@ -251,4 +414,23 @@ if __name__ == "__main__":
         if args.mode in ("cube", "both"):
             # Reuse Part 1 tracking params (ratio/min_matches/ransac thresholds)
             run_part2_cube(cfg, Part1Config())
+    elif args.part == 3:
+        base = Part3Config()
+        cfg3 = Part3Config(
+            calib_output_path=base.calib_output_path,
+            video_path=base.video_path,
+            reference_path=base.reference_path,
+            model_path=(args.model_path if args.model_path is not None else base.model_path),
+            output_path=(args.model_out if args.model_out is not None else base.output_path),
+            plane_width=base.plane_width,
+            model_scale_frac=(args.model_scale_frac if args.model_scale_frac is not None else base.model_scale_frac),
+            model_offset_x_frac=(args.model_offset_x_frac if args.model_offset_x_frac is not None else base.model_offset_x_frac),
+            model_offset_y_frac=(args.model_offset_y_frac if args.model_offset_y_frac is not None else base.model_offset_y_frac),
+            max_faces=(args.max_faces if args.max_faces is not None else base.max_faces),
+            rotate_x_deg=(args.rotate_x_deg if args.rotate_x_deg is not None else base.rotate_x_deg),
+            rotate_y_deg=(args.rotate_y_deg if args.rotate_y_deg is not None else base.rotate_y_deg),
+            rotate_z_deg=(args.rotate_z_deg if args.rotate_z_deg is not None else base.rotate_z_deg),
+            draw_debug_text=base.draw_debug_text,
+        )
+        run_part3_model(cfg3, Part1Config())
 
