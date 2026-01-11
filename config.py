@@ -208,3 +208,55 @@ class Part5Config:
     stripes_color_bgr: tuple[int, int, int] = (255, 255, 255)
     stripes_thickness: int = 1
     stripes_count: int = 0
+
+
+@dataclass(frozen=True)
+class Part4Config:
+    """
+    Part 4: Occlusion handling.
+    Track planar marker -> solvePnP -> render mesh -> composite with a classical CV foreground mask.
+    """
+
+    # Inputs/outputs
+    calib_output_path: str = "outputs/camera/calibration.npz"
+    video_path: str = "data/part4_occlusion_hand.mp4"
+    reference_path: str = "data/part4_reference.JPG"
+    model_path: str = "data/models/86jfmjiufzv2.obj"
+    output_path: str = "outputs/videos/part4_occlusion.mp4"
+
+    # Plane scale
+    plane_width: float = 1.0
+
+    # Mesh placement (same semantics as Part 3)
+    model_scale_frac: float = 0.30
+    model_offset_x_frac: float = 0.55
+    model_offset_y_frac: float = 0.55
+    rotate_x_deg: float = 90.0
+    rotate_y_deg: float = 0.0
+    rotate_z_deg: float = -90.0
+    max_faces: int = 50000
+
+    # Pose estimation
+    # Notebook used IPPE when available.
+    pnp_variant: str = "IPPE"  # "IPPE" or "ITERATIVE"
+    use_pnp_ransac: bool = False
+
+    # Foreground mask (HSV) 
+    h_min: int = 0
+    h_max: int = 10
+    s_min: int = 70
+    s_max: int = 235
+    v_min: int = 75
+    v_max: int = 235
+
+    use_median: bool = True
+    median_ksize: int = 3
+    use_morph: bool = True
+    open_ksize: int = 9
+    close_ksize: int = 13
+    iters: int = 2
+
+    # Optional dilation (to make hand occlude slightly more)
+    use_dilate: bool = True
+    dilate_ksize: int = 5
+    dilate_iters: int = 1

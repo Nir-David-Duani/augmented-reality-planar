@@ -4,7 +4,7 @@ import argparse
 import cv2
 import numpy as np
 
-from config import Part1Config, Part2Config, Part3Config
+from config import Part1Config, Part2Config, Part3Config, Part4Config
 from config import Part5Config
 from tracker import PlanarTracker, warp_and_overlay
 from camera import calibrate_from_chessboard_images, expand_image_glob, save_calibration_npz, load_calibration_npz
@@ -20,6 +20,7 @@ from ar_render import (
     transform_mesh_to_plane,
 )
 from multiplane import export_part5_video, run_part5_multiplane
+from occlusion import raw_hsv_mask, clean_binary_mask, dilate_mask, composite_occlusion
 
 
 def run_part1(cfg: Part1Config):
@@ -373,9 +374,178 @@ def run_part3_model(cfg: Part3Config, tracker_cfg: Part1Config):
     print("Saved:", cfg.output_path)
     print("Pose success rate:", pose_ok, "/", frame_i)
 
+
+def _get_pnp_flag_from_name(name: str) -> int:
+    n = str(name or "").strip().upper()
+    if n == "IPPE" and hasattr(cv2, "SOLVEPNP_IPPE"):
+        return int(cv2.SOLVEPNP_IPPE)
+    return int(cv2.SOLVEPNP_ITERATIVE)
+
+
+def run_part4_occlusion(cfg: Part4Config, tracker_cfg: Part1Config):
+    """
+    Part 4 runner:
+    Track planar marker -> solvePnP -> render mesh -> composite with a hand mask.
+
+    Output is clean (no debug overlays / no plane outline), matching Part 3 style.
+    """
+    if not os.path.exists(cfg.calib_output_path):
+        raise FileNotFoundError(
+            f"Calibration file not found: {cfg.calib_output_path}\n"
+            f"Run Part 2 calibration first: python main.py --part 2 --mode calib"
+        )
+
+    ref = cv2.imread(cfg.reference_path)
+    if ref is None:
+        raise FileNotFoundError(f"Could not read: {cfg.reference_path}")
+
+    calib = load_calibration_npz(cfg.calib_output_path)
+    K_calib = np.asarray(calib.K, dtype=np.float64).reshape(3, 3)
+    dist = np.asarray(calib.dist, dtype=np.float64).reshape(-1, 1)
+
+    cap = cv2.VideoCapture(cfg.video_path)
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Could not open: {cfg.video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    out_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    out_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Scale intrinsics if needed
+    K = K_calib
+    if tuple(calib.image_size) != (out_w, out_h):
+        K = scale_K_to_new_size(K_calib, tuple(calib.image_size), (out_w, out_h))
+    K = np.asarray(K, dtype=np.float64).reshape(3, 3)
+
+    # Plane object points (Z=0)
+    ref_h, ref_w = ref.shape[:2]
+    ref_aspect = ref_h / float(ref_w)
+    plane_w = float(cfg.plane_width)
+    plane_h = float(cfg.plane_width) * ref_aspect
+    obj_plane = np.ascontiguousarray(make_plane_object_points(plane_w, plane_h), dtype=np.float64).reshape(-1, 3)
+
+    # Load mesh + place on plane
+    if cfg.model_path and os.path.exists(cfg.model_path):
+        v, f, face_colors = load_mesh_trimesh(cfg.model_path)
+    else:
+        raise FileNotFoundError(f"Model not found: {cfg.model_path}")
+
+    if cfg.max_faces and int(cfg.max_faces) > 0 and f.shape[0] > int(cfg.max_faces):
+        rng = np.random.default_rng(0)
+        idx = rng.choice(f.shape[0], size=int(cfg.max_faces), replace=False)
+        f = f[idx]
+        if face_colors is not None and face_colors.shape[0] >= idx.max() + 1:
+            face_colors = face_colors[idx]
+
+    v_plane = transform_mesh_to_plane(
+        v,
+        plane_w=plane_w,
+        plane_h=plane_h,
+        scale_frac=cfg.model_scale_frac,
+        offset_x_frac=cfg.model_offset_x_frac,
+        offset_y_frac=cfg.model_offset_y_frac,
+        z_up=True,
+        rotate_x_deg=cfg.rotate_x_deg,
+        rotate_y_deg=cfg.rotate_y_deg,
+        rotate_z_deg=cfg.rotate_z_deg,
+    )
+
+    os.makedirs(os.path.dirname(cfg.output_path), exist_ok=True)
+    writer = cv2.VideoWriter(cfg.output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (out_w, out_h))
+
+    tracker = PlanarTracker(ref, tracker_cfg)
+    frame_i = 0
+    pose_ok = 0
+
+    flag = _get_pnp_flag_from_name(cfg.pnp_variant)
+
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        # --- AR render (Part 3 style) ---
+        H, corners, dbg = tracker.track(frame)
+        ar_frame = frame.copy()
+        ok_pose = False
+
+        if corners is not None:
+            img_pts = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
+            if img_pts.shape == (4, 2) and np.isfinite(img_pts).all():
+                try:
+                    if bool(cfg.use_pnp_ransac) and hasattr(cv2, "solvePnPRansac"):
+                        ok_pnp, rvec, tvec, _inl = cv2.solvePnPRansac(
+                            obj_plane,
+                            img_pts,
+                            K,
+                            dist,
+                            flags=int(flag),
+                            reprojectionError=3.0,
+                            iterationsCount=100,
+                            confidence=0.99,
+                        )
+                    else:
+                        ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=int(flag))
+                except cv2.error:
+                    ok_pnp = False
+
+                if ok_pnp:
+                    ok_pose = True
+                    pose_ok += 1
+                    proj, _ = cv2.projectPoints(v_plane, rvec, tvec, K, dist)
+                    verts2d = proj.reshape(-1, 2)
+
+                    # painter order (far->near)
+                    R, _ = cv2.Rodrigues(rvec)
+                    cam = (R @ v_plane.T + tvec).T
+                    z = cam[:, 2]
+                    face_depth = z[f].mean(axis=1)
+                    order = np.argsort(face_depth)[::-1]
+
+                    if face_colors is not None:
+                        ar_frame = draw_mesh_flat(ar_frame, verts2d, f, face_colors, order=order)
+                    else:
+                        ar_frame = draw_mesh_wireframe(ar_frame, verts2d, f, color=(0, 255, 255), thickness=1)
+
+        # --- Foreground mask (hand) ---
+        mask = raw_hsv_mask(
+            frame,
+            h_min=int(cfg.h_min),
+            h_max=int(cfg.h_max),
+            s_min=int(cfg.s_min),
+            s_max=int(cfg.s_max),
+            v_min=int(cfg.v_min),
+            v_max=int(cfg.v_max),
+        )
+        mask = clean_binary_mask(
+            mask,
+            use_median=bool(cfg.use_median),
+            median_ksize=int(cfg.median_ksize),
+            use_morph=bool(cfg.use_morph),
+            open_ksize=int(cfg.open_ksize),
+            close_ksize=int(cfg.close_ksize),
+            iters=int(cfg.iters),
+        )
+        if bool(cfg.use_dilate):
+            mask = dilate_mask(mask, ksize=int(cfg.dilate_ksize), iters=int(cfg.dilate_iters))
+
+        # --- Composite (no debug overlays) ---
+        out = composite_occlusion(frame, ar_frame, mask)
+        writer.write(out)
+
+        frame_i += 1
+        if frame_i % 60 == 0:
+            print(f"[part4] frames={frame_i} pose_ok={pose_ok}")
+
+    cap.release()
+    writer.release()
+    cv2.destroyAllWindows()
+    print("Saved:", cfg.output_path)
+    print("Pose success rate:", pose_ok, "/", frame_i)
+
 def parse_args():
     p = argparse.ArgumentParser(description="Project 2 runner (Parts 1-5).")
-    p.add_argument("--part", type=int, default=1, choices=[1, 2, 3, 5], help="Which part to run.")
+    p.add_argument("--part", type=int, default=1, choices=[1, 2, 3, 4, 5], help="Which part to run.")
     p.add_argument("--mode", type=str, default="both", choices=["calib", "cube", "both"],
                    help="Part 2 mode: calibrate intrinsics, render cube, or both.")
     p.add_argument("--part5_video", type=str, default=None, help="Input video path for Part 5.")
@@ -467,6 +637,9 @@ if __name__ == "__main__":
             draw_debug_text=base.draw_debug_text,
         )
         run_part3_model(cfg3, Part1Config())
+    elif args.part == 4:
+        # Part 4: occlusion handling (clean output, no debug overlays)
+        run_part4_occlusion(Part4Config(), Part1Config())
     elif args.part == 5:
         base5 = Part5Config()
         cfg5 = Part5Config(
