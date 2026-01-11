@@ -19,8 +19,4 @@ outputs/*
 *.mp4
 *.mov
 *.MOV
-*.jpg
-*.JPG
-*.jpeg
-*.png
 *.zip
