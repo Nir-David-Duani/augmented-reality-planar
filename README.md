@@ -52,26 +52,26 @@ Notes:
 
 ### Part 1 — Tracking + warp
 
-![Part 1: keypoints and matches](<../results part 1/SIFT keypoints both.png>)
-![Part 1: overlay result](<../results part 1/result.png>)
+![Part 1: keypoints and matches](</results part 1/SIFT keypoints both.png>)
+![Part 1: overlay result](</results part 1/result.png>)
 
 ### Part 2 — Calibration + cube
 
-![Part 2: undistortion](<../results part 2/undistorted.png>)
-![Part 2: cube render](<../results part 2/cube.png>)
+![Part 2: undistortion](</results part 2/undistorted.png>)
+![Part 2: cube render](</results part 2/cube.png>)
 
 ### Part 3 — Mesh render
 
-![Part 3: mesh render](<../results part 3/result.png>)
+![Part 3: mesh render](</results part 3/result.png>)
 
 ### Part 4 — Occlusion
 
-![Part 4: mask + morphology](<../results part 4/morphology and mask.png>)
-![Part 4: final composite](<../results part 4/final.png>)
+![Part 4: mask + morphology](</results part 4/morphology and mask.png>)
+![Part 4: final composite](</results part 4/final.png>)
 
 ### Part 5 — Multi‑plane portals
 
-![Part 5: portals](<../results part 5/output portals.png>)
+![Part 5: portals](</results part 5/output portals.png>)
 
 ---
 
