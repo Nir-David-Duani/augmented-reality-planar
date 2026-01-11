@@ -10,7 +10,18 @@ This repository implements a **classical (non‑learning) planar AR pipeline** a
 
 ---
 
+## Repository note (important)
+
+This GitHub repository contains the **implementation code** and clean walkthrough notebooks.
+Large media assets (videos / calibration images / large result sets) are **not** included in the repo.
+
+To reproduce results, download the assets from the Google Drive link below and place them under `data/` (and optionally `results part */`).
+
+---
+
 ## Quick start
+
+### Run locally (requires the project assets from Drive)
 
 1. Install dependencies:
 
@@ -18,7 +29,7 @@ This repository implements a **classical (non‑learning) planar AR pipeline** a
 pip install -r requirements.txt
 ```
 
-2. Run parts (from inside `augmented-reality-planar/`):
+2. After downloading the assets, run parts (from inside `augmented-reality-planar/`):
 
 ```bash
 python main.py --part 1
@@ -52,26 +63,26 @@ Notes:
 
 ### Part 1 — Tracking + warp
 
-![Part 1: keypoints and matches](</results part 1/SIFT keypoints both.png>)
-![Part 1: overlay result](</results part 1/result.png>)
+![Part 1: keypoints and matches](docs/images/part1_keypoints_matches.png)
+![Part 1: overlay result](docs/images/part1_overlay.png)
 
 ### Part 2 — Calibration + cube
 
-![Part 2: undistortion](</results part 2/undistorted.png>)
-![Part 2: cube render](</results part 2/cube.png>)
+![Part 2: undistortion](docs/images/part2_undistort.png)
+![Part 2: cube render](docs/images/part2_cube.png)
 
 ### Part 3 — Mesh render
 
-![Part 3: mesh render](</results part 3/result.png>)
+![Part 3: mesh render](docs/images/part3_mesh.png)
 
 ### Part 4 — Occlusion
 
-![Part 4: mask + morphology](</results part 4/morphology and mask.png>)
-![Part 4: final composite](</results part 4/final.png>)
+![Part 4: mask + morphology](docs/images/part4_mask.png)
+![Part 4: final composite](docs/images/part4_occlusion.png)
 
 ### Part 5 — Multi‑plane portals
 
-![Part 5: portals](</results part 5/output portals.png>)
+![Part 5: portals](docs/images/part5_portals.png)
 
 ---
 
