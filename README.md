@@ -99,8 +99,8 @@ Notes:
 ## Results (sample images)
 
 ### Part 1 — Tracking + warp
-![Part 1: keypoints and matches](docs/images/part1_keypoints_matches.png)
-![Part 1: overlay result](docs/images/part1_overlay.png)
+![Part 1: matches (perfect)](docs/images/part1_matches_perfect.png)
+![Part 1: overlay result](docs/images/part1_overly_result.png)
 
 ### Part 2 — Calibration + cube
 ![Part 2: undistortion](docs/images/part2_undistort.png)
