@@ -52,32 +52,32 @@ Notes:
 
 ### Part 1 — Tracking + warp
 
-![Part 1: keypoints and matches](../results%20part%201/SIFT%20keypoints%20both.png)
-![Part 1: overlay result](../results%20part%201/result.png)
+![Part 1: keypoints and matches](<../results part 1/SIFT keypoints both.png>)
+![Part 1: overlay result](<../results part 1/result.png>)
 
 ### Part 2 — Calibration + cube
 
-![Part 2: undistortion](../results%20part%202/undistorted.png)
-![Part 2: cube render](../results%20part%202/cube.png)
+![Part 2: undistortion](<../results part 2/undistorted.png>)
+![Part 2: cube render](<../results part 2/cube.png>)
 
 ### Part 3 — Mesh render
 
-![Part 3: mesh render](../results%20part%203/result.png)
+![Part 3: mesh render](<../results part 3/result.png>)
 
 ### Part 4 — Occlusion
 
-![Part 4: mask + morphology](../results%20part%204/morphology%20and%20mask.png)
-![Part 4: final composite](../results%20part%204/final.png)
+![Part 4: mask + morphology](<../results part 4/morphology and mask.png>)
+![Part 4: final composite](<../results part 4/final.png>)
 
 ### Part 5 — Multi‑plane portals
 
-![Part 5: portals](../results%20part%205/output%20portals.png)
+![Part 5: portals](<../results part 5/output portals.png>)
 
 ---
 
 ## Links
 
-- **Videos (Google Drive)**: [Drive folder](https://drive.google.com/file/d/1-Vjy_mMf9JbnEZ5UbXa0gbWikDwWZ7bt/view?usp=drive_link)
+- **Videos (Google Drive)**: [Drive folder](https://drive.google.com/drive/folders/1Z0hUGtW1wzkdcgsVf_CUyesgSnEFWKU1?usp=drive_link)
 - **Report (PDF)**: _Coming soon_ (add link here once the PDF is ready)
 
 ---
