@@ -1,5 +1,8 @@
 ## Project Structure and File Responsibilities
 
+**Note**: `augmented-reality-planar/` is the canonical (current) implementation for Parts 1–3.
+The sibling folder `augmented-reality-planar1/` is an older iteration kept for reference.
+
 This project is organized as a modular planar augmented reality system.
 Each file has a single, well-defined responsibility.
 This separation is intentional and is designed to support incremental
@@ -113,6 +116,10 @@ Responsibilities:
 - Estimate pose for each tracked plane
 - Implement visualization logic (portal or particle flow)
 - Handle tracking loss and recovery
+
+Notebook (lightweight debug on a single frame):
+- `Part5_pose_validation_step_by_step.ipynb`
+- `Part5_step_by_step.ipynb`
 
 --------------------------------------------------
 

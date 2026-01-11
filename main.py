@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from config import Part1Config, Part2Config, Part3Config
+from config import Part5Config
 from tracker import PlanarTracker, warp_and_overlay
 from camera import calibrate_from_chessboard_images, expand_image_glob, save_calibration_npz, load_calibration_npz
 from ar_render import (
@@ -18,6 +19,7 @@ from ar_render import (
     scale_K_to_new_size,
     transform_mesh_to_plane,
 )
+from multiplane import export_part5_video, run_part5_multiplane
 
 
 def run_part1(cfg: Part1Config):
@@ -70,8 +72,15 @@ def run_part1(cfg: Part1Config):
                 cv2.polylines(out, [corners.astype(int)], True, (0, 255, 0), 2)
 
         if cfg.draw_debug_text:
-            cv2.putText(out, f"good={dbg['good']} inliers={dbg['inliers']}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            cv2.putText(
+                out,
+                f"good={dbg.get('good',0)} inliers={dbg.get('inliers',0)} held={dbg.get('held',0)} sm={dbg.get('smoothed',0)}",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 0, 255),
+                2,
+            )
 
         writer.write(out)
 
@@ -182,9 +191,17 @@ def run_part2_cube(cfg: Part2Config, tracker_cfg: Part1Config):
                 pass
             else:
                 try:
-                    ok_pnp, rvec, tvec = cv2.solvePnP(
-                        obj_plane, img_pts, K, dist, flags=cv2.SOLVEPNP_ITERATIVE
-                    )
+                    ok_pnp = False
+                    if hasattr(cv2, "SOLVEPNP_IPPE"):
+                        try:
+                            ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=int(cv2.SOLVEPNP_IPPE))
+                        except cv2.error:
+                            ok_pnp = False
+
+                        if not ok_pnp:
+                            ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=int(cv2.SOLVEPNP_ITERATIVE))
+                    else:
+                        ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=int(cv2.SOLVEPNP_ITERATIVE))
                 except cv2.error:
                     ok_pnp = False
 
@@ -304,7 +321,17 @@ def run_part3_model(cfg: Part3Config, tracker_cfg: Part1Config):
             img_pts = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
             if img_pts.shape == (4, 2) and np.isfinite(img_pts).all():
                 try:
-                    ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=cv2.SOLVEPNP_ITERATIVE)
+                    ok_pnp = False
+                    if hasattr(cv2, "SOLVEPNP_IPPE"):
+                        try:
+                            ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=int(cv2.SOLVEPNP_IPPE))
+                        except cv2.error:
+                            ok_pnp = False
+
+                        if not ok_pnp:
+                            ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=int(cv2.SOLVEPNP_ITERATIVE))
+                    else:
+                        ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=int(cv2.SOLVEPNP_ITERATIVE))
                 except cv2.error:
                     ok_pnp = False
 
@@ -348,9 +375,16 @@ def run_part3_model(cfg: Part3Config, tracker_cfg: Part1Config):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Project 2 runner (Parts 1-5).")
-    p.add_argument("--part", type=int, default=1, choices=[1, 2, 3], help="Which part to run (implemented: 1-3).")
+    p.add_argument("--part", type=int, default=1, choices=[1, 2, 3, 5], help="Which part to run.")
     p.add_argument("--mode", type=str, default="both", choices=["calib", "cube", "both"],
                    help="Part 2 mode: calibrate intrinsics, render cube, or both.")
+    p.add_argument("--part5_video", type=str, default=None, help="Input video path for Part 5.")
+    p.add_argument("--ref1", type=str, default=None, help="Reference image 1 for Part 5.")
+    p.add_argument("--ref2", type=str, default=None, help="Reference image 2 for Part 5.")
+    p.add_argument("--ref3", type=str, default=None, help="Reference image 3 for Part 5.")
+    p.add_argument("--feature", type=str, default=None, choices=["SIFT", "ORB"], help="Feature type for Part 5.")
+    p.add_argument("--part5_mode", type=str, default="portal", choices=["raw", "outline", "portal", "portal360"], help="Part 5 export: raw, outline-only, solid portal, or portal360 (panorama).")
+    p.add_argument("--part5_out", type=str, default=None, help="Output video path for Part 5 (optional).")
 
     # Optional Part 2 overrides
     p.add_argument("--calib_glob", type=str, default=None, help="e.g. data/chessboard/*.jpg")
@@ -433,4 +467,44 @@ if __name__ == "__main__":
             draw_debug_text=base.draw_debug_text,
         )
         run_part3_model(cfg3, Part1Config())
+    elif args.part == 5:
+        base5 = Part5Config()
+        cfg5 = Part5Config(
+            calib_output_path=base5.calib_output_path,
+            video_path=(args.part5_video if args.part5_video is not None else base5.video_path),
+            reference1_path=(args.ref1 if args.ref1 is not None else base5.reference1_path),
+            reference2_path=(args.ref2 if args.ref2 is not None else base5.reference2_path),
+            reference3_path=(args.ref3 if args.ref3 is not None else base5.reference3_path),
+            feature_type=(args.feature if args.feature is not None else base5.feature_type),
+            ratio_test=base5.ratio_test,
+            min_matches=base5.min_matches,
+            ransac_reproj_thresh=base5.ransac_reproj_thresh,
+            min_inliers=base5.min_inliers,
+            homography_method=base5.homography_method,
+            refine_homography_with_inliers=base5.refine_homography_with_inliers,
+            max_hold_frames=base5.max_hold_frames,
+            plane_width=base5.plane_width,
+            portal_size_frac=base5.portal_size_frac,
+            portal_fill_bgr=base5.portal_fill_bgr,
+            portal_border_bgr=base5.portal_border_bgr,
+            portal_border_thickness=base5.portal_border_thickness,
+            portal_alpha=base5.portal_alpha,
+            draw_plane_outline=base5.draw_plane_outline,
+            draw_debug_text=base5.draw_debug_text,
+        )
+        mode = str(args.part5_mode or "portal").lower().strip()
+        if mode == "raw":
+            outp = args.part5_out if args.part5_out is not None else "outputs/videos/part5_raw.mp4"
+            export_part5_video(cfg5, outp, draw_portal=False)
+        elif mode == "outline":
+            outp = args.part5_out if args.part5_out is not None else "outputs/videos/part5_outline.mp4"
+            export_part5_video(cfg5, outp, draw_portal=False, draw_plane_outline=True, draw_debug_text=False)
+        elif mode == "portal":
+            outp = args.part5_out if args.part5_out is not None else "outputs/videos/part5_portal.mp4"
+            export_part5_video(cfg5, outp, draw_portal=True, use_env_portals=False, draw_plane_outline=True, draw_debug_text=False)
+        elif mode == "portal360":
+            outp = args.part5_out if args.part5_out is not None else "outputs/videos/part5_portal360.mp4"
+            export_part5_video(cfg5, outp, draw_portal=True, use_env_portals=True, draw_plane_outline=True, draw_debug_text=False)
+        else:
+            run_part5_multiplane(cfg5)
 
