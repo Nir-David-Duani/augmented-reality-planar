@@ -1,144 +1,142 @@
-## Project Structure and File Responsibilities
+## Planar Augmented Reality (Computer Vision Project)
 
-This project is organized as a modular planar augmented reality system.
-Each file has a single, well-defined responsibility.
-This separation is intentional and is designed to support incremental
-development, debugging, and clear reasoning.
+### Video Results
+[Click here to view the videos (Google Drive)](https://drive.google.com/drive/folders/1Z0hUGtW1wzkdcgsVf_CUyesgSnEFWKU1?usp=drive_link)
 
---------------------------------------------------
+### Project Report
+_Coming soon_ (PDF link will be added here)
 
-### main.py
-Entry point of the project.
+---
 
-Responsibilities:
-- Open video file or camera stream
-- Run the main processing loop
-- Call the appropriate modules based on the current mode (Part 1–5)
-- Save output videos and display results
+A classical computer vision project for **planar augmented reality** (no deep learning).
+The system tracks planar targets in video and renders virtual content with correct perspective, pose, and occlusion.
 
-main.py contains orchestration logic only.
-It does not implement core algorithms.
+## Project Overview
+This project implements 5 parts:
 
---------------------------------------------------
+- **Part 1**: Planar tracking (SIFT → matching → RANSAC homography) + template warp
+- **Part 2**: Camera calibration (chessboard) + AR cube (pose via `solvePnP`)
+- **Part 3**: AR 3D mesh rendering on the planar target
+- **Part 4**: Occlusion handling (foreground mask → composite)
+- **Part 5**: Multi‑plane tracking (3 targets) + portal / portal360 visualization
 
-### config.py
-Single source of truth for the entire project.
+## Features
+- **Classical CV pipeline**: SIFT/ORB, RANSAC, `solvePnP`, projection
+- **Stable tracking**: optional temporal smoothing + hold-frames logic
+- **3D rendering**: cube + full mesh rendering (wireframe / flat shading)
+- **Occlusion**: HSV foreground mask + morphology + compositing
+- **Multi-target**: track 3 planar references simultaneously and render portals
 
-Responsibilities:
-- File paths (data, outputs, models)
-- Algorithm parameters (feature detection, RANSAC, thresholds)
-- Camera and AR parameters (cube size, visualization mode)
-- Global configuration flags
+---
 
-No algorithmic logic is implemented here.
+## Method (How it works)
 
---------------------------------------------------
+### Part 1 — Planar tracking + template warp
+- Detect SIFT features in the reference image.
+- Detect SIFT features in each video frame and match descriptors (KNN + Lowe’s ratio test).
+- Estimate a homography \(H\) using RANSAC and project the 4 reference corners onto the frame.
+- Warp the template into the frame using \(H\) and composite it on the detected quadrilateral.
 
-### tracker.py
-Planar surface detection and tracking (Part 1).
+### Part 2 — Camera calibration + AR cube
+- Detect chessboard corners across calibration images and calibrate camera intrinsics \(K\) + distortion `dist`.
+- For each video frame: track the planar target to get 4 image corners.
+- Define corresponding 3D plane corners (Z=0) and estimate pose with `solvePnP`.
+- Project a 3D cube with `projectPoints` and draw it on the frame.
 
-Responsibilities:
-- Detect features in the reference image
-- Match features between reference and video frames
-- Estimate planar homography using RANSAC
-- Extract 2D corner locations of the tracked planar surface
+### Part 3 — AR mesh rendering
+- Reuse Part 2 pose estimation (planar tracking → `solvePnP`).
+- Load a 3D mesh and transform it to sit on the plane (scale / offset / rotation).
+- Project mesh vertices to the image and render (wireframe or flat shading + painter’s ordering).
 
-Outputs:
-- Homography matrix
-- 2D corner coordinates
-- Optional debug visualizations
+### Part 4 — Occlusion
+- Render the AR mesh frame (same style as Part 3).
+- Compute a foreground mask using HSV thresholding + median + morphology (open/close) and optional dilation.
+- Composite: where mask==foreground keep the real frame, otherwise show the AR render.
 
---------------------------------------------------
+### Part 5 — Multi‑plane portals
+- Compute frame features once (SIFT or ORB).
+- For each reference: match → RANSAC homography → corners → pose (`solvePnP`), with optional temporal smoothing.
+- Render a portal on each detected plane.
+- Optional portal360: map an equirectangular environment image inside the portal based on the estimated camera pose.
 
-### camera.py
-Camera modeling and pose estimation (Part 2).
+---
 
-Responsibilities:
-- Camera calibration using a chessboard
-- Load and store camera intrinsics and distortion coefficients
-- Estimate planar pose using solvePnP
+## Repository note (important)
+Large media assets (videos / calibration images) are not always committed to GitHub.
+If you want to reproduce results locally, download the assets from the Drive link and place them under `data/`.
 
-Outputs:
-- Rotation vector (rvec)
-- Translation vector (tvec)
+---
 
---------------------------------------------------
+## Quick start
 
-### ar_render.py
-Augmented reality rendering (Parts 2 and 3).
+From inside `augmented-reality-planar/`:
 
-Responsibilities:
-- Project 3D points onto the image plane
-- Render a 3D cube aligned with the planar surface
-- Render a full 3D mesh model
-- Handle basic depth ordering if needed
+```bash
+pip install -r requirements.txt
+python main.py --part 1
+python main.py --part 2 --mode both
+python main.py --part 3
+python main.py --part 4
+python main.py --part 5 --part5_mode portal
+```
 
-This module assumes a valid pose and camera model are provided.
+---
 
---------------------------------------------------
+## Clean notebooks (recommended)
+These notebooks are aligned with the actual code and show the pipeline step-by-step:
 
-### occlusion.py
-Occlusion handling (Part 4).
+- `01_Part1_Planar_Tracking_and_Warp.ipynb`
+- `02_Part2_Calibration_and_AR_Cube.ipynb`
+- `03_Part3_AR_Mesh_Rendering.ipynb`
+- `04_Part4_Occlusion_Masking.ipynb`
+- `05_Part5_MultiPlane_Portals.ipynb`
 
-Responsibilities:
-- Detect foreground objects using classical computer vision techniques
-- Generate a binary occlusion mask
-- Composite AR content with correct occlusion behavior
+Notes:
+- Parts 2–5 include `frame_idx` to pick a specific frame for debugging.
 
-No tracking or pose estimation is performed here.
+---
 
---------------------------------------------------
+## Results (sample images)
 
-### multi_plane.py
-Multi-plane tracking and visualization (Part 5).
+### Part 1 — Tracking + warp
+![Part 1: matches (perfect)](docs/images/part1_matches_perfect.png)
+![Part 1: overlay result](docs/images/part1_overly_result.png)
 
-Responsibilities:
-- Manage multiple planar trackers simultaneously
-- Estimate pose for each tracked plane
-- Implement visualization logic (portal or particle flow)
-- Handle tracking loss and recovery
+### Part 2 — Calibration + cube
+![Part 2: undistortion](docs/images/part2_undistort.png)
+![Part 2: cube render](docs/images/part2_cube.png)
 
---------------------------------------------------
+### Part 3 — Mesh render
+![Part 3: mesh render](docs/images/part3_mesh.png)
 
-### data/
-Contains all static input data:
-- Reference images
-- Template images
-- Camera calibration images
-- 3D models
+### Part 4 — Occlusion
+![Part 4: mask + morphology](docs/images/part4_mask.png)
+![Part 4: final composite](docs/images/part4_occlusion.png)
 
---------------------------------------------------
+### Part 5 — Multi‑plane portals
+![Part 5: portals](docs/images/part5_portals.png)
 
-### outputs/
-Contains all generated results:
-- Output videos
-- Debug visualizations
+---
 
---------------------------------------------------
+## Project Structure
 
-### PROJECT_NOTES.md
-Internal development notes.
+`augmented-reality-planar/`
+```
+augmented-reality-planar/
+  main.py              # Runner / orchestration for Parts 1–5
+  config.py            # Central configuration (paths + parameters)
+  tracker.py           # Planar tracking (features + matching + homography)
+  camera.py            # Calibration utilities + NPZ I/O
+  ar_render.py         # 3D rendering utilities (cube + mesh)
+  occlusion.py         # Foreground mask + compositing (Part 4)
+  multiplane.py        # Multi-plane tracking + portals (Part 5)
+  docs/images/         # README images (small screenshots for GitHub)
+  outputs/             # Generated videos + calibration
+```
 
-Purpose:
-- Design decisions
-- Rules of thumb
-- Debugging observations
-- Known limitations and failures
+---
 
-This file is not part of the final report, but supports development.
-
---------------------------------------------------
-
-### requirements.txt
-Lists all Python dependencies required to run the project.
-
---------------------------------------------------
-
-## Design Philosophy
-- One responsibility per file
-- No duplicated logic
-- Debugging before optimization
-- Stability over visual perfection
-
-The system is built as a classical computer vision pipeline,
-not as a learning-based system.
+## CLI options (useful)
+- **Part 2**: `--mode calib | cube | both`
+- **Part 3**: `--model_path ...`, `--model_out ...`, `--rotate_x_deg ...`, `--rotate_y_deg ...`, `--rotate_z_deg ...`
+- **Part 5**: `--part5_mode raw | outline | portal | portal360`, `--part5_out ...`

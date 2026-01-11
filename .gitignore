@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data / outputs (do not commit large media)
+data/*
+outputs/*
+
+# Keep folder structure in git
+!data/.gitkeep
+!outputs/.gitkeep
+!outputs/videos/.gitkeep
+!outputs/debug/.gitkeep
+
+# Common media files (extra safety)
+*.mp4
+*.mov
+*.MOV
+*.zip
