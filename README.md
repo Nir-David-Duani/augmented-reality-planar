@@ -1,167 +1,117 @@
-## Project Structure and File Responsibilities
+## Planar Augmented Reality (Computer Vision Project)
 
-**Note**: `augmented-reality-planar/` is the canonical (current) implementation for Parts 1–3.
-The sibling folder `augmented-reality-planar1/` is an older iteration kept for reference.
+This repository implements a **classical (non‑learning) planar AR pipeline** across 5 parts:
 
-This project is organized as a modular planar augmented reality system.
-Each file has a single, well-defined responsibility.
-This separation is intentional and is designed to support incremental
-development, debugging, and clear reasoning.
+- **Part 1**: Planar tracking (SIFT → matches → RANSAC homography) + template warp
+- **Part 2**: Camera calibration (chessboard) + AR cube via pose estimation (`solvePnP`)
+- **Part 3**: AR 3D mesh rendering on the planar target
+- **Part 4**: Occlusion handling (foreground mask → composite)
+- **Part 5**: Multi‑plane tracking (3 targets) + portal / portal360 visualization
 
---------------------------------------------------
+---
 
-### main.py
-Entry point of the project.
+## Quick start
 
-Responsibilities:
-- Open video file or camera stream
-- Run the main processing loop
-- Call the appropriate modules based on the current mode (Part 1–5)
-- Save output videos and display results
+1. Install dependencies:
 
-main.py contains orchestration logic only.
-It does not implement core algorithms.
+```bash
+pip install -r requirements.txt
+```
 
---------------------------------------------------
+2. Run parts (from inside `augmented-reality-planar/`):
 
-### config.py
-Single source of truth for the entire project.
+```bash
+python main.py --part 1
+python main.py --part 2 --mode both
+python main.py --part 3
+python main.py --part 4
+python main.py --part 5 --part5_mode portal
+```
 
-Responsibilities:
-- File paths (data, outputs, models)
-- Algorithm parameters (feature detection, RANSAC, thresholds)
-- Camera and AR parameters (cube size, visualization mode)
-- Global configuration flags
+Outputs are written under `outputs/` (videos under `outputs/videos/`).
 
-No algorithmic logic is implemented here.
+---
 
---------------------------------------------------
+## Clean notebooks (recommended for reviewing the project)
 
-### tracker.py
-Planar surface detection and tracking (Part 1).
+These notebooks are aligned with the **actual code** in the repository and are written to be readable:
 
-Responsibilities:
-- Detect features in the reference image
-- Match features between reference and video frames
-- Estimate planar homography using RANSAC
-- Extract 2D corner locations of the tracked planar surface
+- `01_Part1_Planar_Tracking_and_Warp.ipynb`
+- `02_Part2_Calibration_and_AR_Cube.ipynb`
+- `03_Part3_AR_Mesh_Rendering.ipynb`
+- `04_Part4_Occlusion_Masking.ipynb`
+- `05_Part5_MultiPlane_Portals.ipynb`
 
-Outputs:
-- Homography matrix
-- 2D corner coordinates
-- Optional debug visualizations
+Notes:
+- Parts 2–5 include a `frame_idx` variable to pick a specific frame for single‑frame debugging/visualization.
+- Part 5 can show either a solid portal fill or a portal360 texture (from `data/env*_360.jpg`).
 
---------------------------------------------------
+---
 
-### camera.py
-Camera modeling and pose estimation (Part 2).
+## Results (sample images)
 
-Responsibilities:
-- Camera calibration using a chessboard
-- Load and store camera intrinsics and distortion coefficients
- - (Used by Part 2) Provide intrinsics/distortion for pose estimation
+### Part 1 — Tracking + warp
 
-Outputs:
-- Camera intrinsics matrix K
-- Distortion coefficients
+![Part 1: keypoints and matches](../results%20part%201/SIFT%20keypoints%20both.png)
+![Part 1: overlay result](../results%20part%201/result.png)
 
---------------------------------------------------
+### Part 2 — Calibration + cube
 
-### ar_render.py
-Augmented reality rendering (Parts 2 and 3).
+![Part 2: undistortion](../results%20part%202/undistorted.png)
+![Part 2: cube render](../results%20part%202/cube.png)
 
-Responsibilities:
-- Project 3D points onto the image plane
-- Render a 3D cube aligned with the planar surface
-- Render a full 3D mesh model
-- Handle basic depth ordering if needed
+### Part 3 — Mesh render
 
-This module assumes a valid pose and camera model are provided.
+![Part 3: mesh render](../results%20part%203/result.png)
 
---------------------------------------------------
+### Part 4 — Occlusion
 
-## Implemented Parts
+![Part 4: mask + morphology](../results%20part%204/morphology%20and%20mask.png)
+![Part 4: final composite](../results%20part%204/final.png)
 
-### Part 1
-- Run: `python main.py --part 1`
-- Output: `outputs/videos/part1.mp4`
+### Part 5 — Multi‑plane portals
 
-### Part 2
-- Run calibration + cube: `python main.py --part 2 --mode both`
-- Run only calibration: `python main.py --part 2 --mode calib`
-- Run only cube (requires existing calibration): `python main.py --part 2 --mode cube`
-- Outputs:
+![Part 5: portals](../results%20part%205/output%20portals.png)
+
+---
+
+## Links
+
+- **Videos (Google Drive)**: [Drive folder](https://drive.google.com/file/d/1-Vjy_mMf9JbnEZ5UbXa0gbWikDwWZ7bt/view?usp=drive_link)
+- **Report (PDF)**: _Coming soon_ (add link here once the PDF is ready)
+
+---
+
+## Project structure (core modules)
+
+- `main.py`: Entry point / orchestration (selects which part to run, reads inputs, writes videos).
+- `config.py`: Central configuration (paths + algorithm parameters).
+- `tracker.py`: Planar tracking (SIFT + matching + homography) used in Parts 1–4.
+- `camera.py`: Camera calibration helpers + calibration I/O (`outputs/camera/calibration.npz`).
+- `ar_render.py`: 3D utilities (cube points, mesh loading, projection, rendering).
+- `occlusion.py`: Foreground mask + compositing (Part 4).
+- `multiplane.py`: Multi‑plane tracking + portal rendering (Part 5).
+
+---
+
+## Inputs and outputs
+
+- **Inputs**: `data/` (videos, reference images, chessboard images, models, portal environments).
+- **Outputs**: `outputs/`
   - `outputs/camera/calibration.npz`
-  - `outputs/videos/part2_cube.mp4`
+  - `outputs/videos/*.mp4`
 
---------------------------------------------------
+---
 
-### occlusion.py
-Occlusion handling (Part 4).
+## CLI options (useful)
 
-Responsibilities:
-- Detect foreground objects using classical computer vision techniques
-- Generate a binary occlusion mask
-- Composite AR content with correct occlusion behavior
+- Part 2:
+  - `--mode calib | cube | both`
+- Part 3:
+  - `--model_path ...` / `--model_out ...`
+  - `--rotate_x_deg ...` / `--rotate_y_deg ...` / `--rotate_z_deg ...`
+- Part 5:
+  - `--part5_mode raw | outline | portal | portal360`
+  - `--part5_out ...`
 
-No tracking or pose estimation is performed here.
-
---------------------------------------------------
-
-### multi_plane.py
-Multi-plane tracking and visualization (Part 5).
-
-Responsibilities:
-- Manage multiple planar trackers simultaneously
-- Estimate pose for each tracked plane
-- Implement visualization logic (portal or particle flow)
-- Handle tracking loss and recovery
-
-Notebook (lightweight debug on a single frame):
-- `Part5_pose_validation_step_by_step.ipynb`
-- `Part5_step_by_step.ipynb`
-
---------------------------------------------------
-
-### data/
-Contains all static input data:
-- Reference images
-- Template images
-- Camera calibration images
-- 3D models
-
---------------------------------------------------
-
-### outputs/
-Contains all generated results:
-- Output videos
-- Debug visualizations
-
---------------------------------------------------
-
-### PROJECT_NOTES.md
-Internal development notes.
-
-Purpose:
-- Design decisions
-- Rules of thumb
-- Debugging observations
-- Known limitations and failures
-
-This file is not part of the final report, but supports development.
-
---------------------------------------------------
-
-### requirements.txt
-Lists all Python dependencies required to run the project.
-
---------------------------------------------------
-
-## Design Philosophy
-- One responsibility per file
-- No duplicated logic
-- Debugging before optimization
-- Stability over visual perfection
-
-The system is built as a classical computer vision pipeline,
-not as a learning-based system.
+---

@@ -23,20 +23,64 @@ from multiplane import export_part5_video, run_part5_multiplane
 from occlusion import raw_hsv_mask, clean_binary_mask, dilate_mask, composite_occlusion
 
 
+def _read_image_or_raise(path: str) -> np.ndarray:
+    img = cv2.imread(path)
+    if img is None:
+        raise FileNotFoundError(f"Could not read: {path}")
+    return img
+
+
+def _video_props(cap: cv2.VideoCapture) -> tuple[float, int, int]:
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    out_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    out_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    return float(fps), out_w, out_h
+
+
+def _load_K_dist_for_video(calib_path: str, out_w: int, out_h: int) -> tuple[np.ndarray, np.ndarray]:
+    calib = load_calibration_npz(calib_path)
+    K_calib = np.asarray(calib.K, dtype=np.float64).reshape(3, 3)
+    dist = np.asarray(calib.dist, dtype=np.float64).reshape(-1, 1)
+    K = K_calib
+    if tuple(calib.image_size) != (out_w, out_h):
+        K = scale_K_to_new_size(K_calib, tuple(calib.image_size), (out_w, out_h))
+    return np.asarray(K, dtype=np.float64).reshape(3, 3), dist
+
+
+def _plane_w_h_from_reference(ref_bgr: np.ndarray, plane_width: float) -> tuple[float, float]:
+    ref_h, ref_w = ref_bgr.shape[:2]
+    ref_aspect = ref_h / float(ref_w)
+    plane_w = float(plane_width)
+    plane_h = float(plane_width) * ref_aspect
+    return plane_w, plane_h
+
+
+def _solve_pnp_ippe_fallback(
+    obj_pts: np.ndarray, img_pts: np.ndarray, K: np.ndarray, dist: np.ndarray
+) -> tuple[bool, np.ndarray | None, np.ndarray | None]:
+    try:
+        if hasattr(cv2, "SOLVEPNP_IPPE"):
+            try:
+                ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, dist, flags=int(cv2.SOLVEPNP_IPPE))
+            except cv2.error:
+                ok = False
+            if not ok:
+                ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, dist, flags=int(cv2.SOLVEPNP_ITERATIVE))
+        else:
+            ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, dist, flags=int(cv2.SOLVEPNP_ITERATIVE))
+        return bool(ok), rvec, tvec
+    except cv2.error:
+        return False, None, None
+
+
 def run_part1(cfg: Part1Config):
     """
     Part 1 runner:
     SIFT -> ratio test -> homography (RANSAC) -> warp template -> write output video.
     """
 
-    # Read inputs
-    ref = cv2.imread(cfg.reference_path)
-    if ref is None:
-        raise FileNotFoundError(f"Could not read: {cfg.reference_path}")
-
-    template = cv2.imread(cfg.template_path)
-    if template is None:
-        raise FileNotFoundError(f"Could not read: {cfg.template_path}")
+    ref = _read_image_or_raise(cfg.reference_path)
+    template = _read_image_or_raise(cfg.template_path)
 
     if cfg.resize_template_to_reference:
         h, w = ref.shape[:2]
@@ -46,9 +90,7 @@ def run_part1(cfg: Part1Config):
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open: {cfg.video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    out_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    out_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps, out_w, out_h = _video_props(cap)
 
     os.makedirs(os.path.dirname(cfg.output_path), exist_ok=True)
     writer = cv2.VideoWriter(cfg.output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (out_w, out_h))
@@ -131,33 +173,16 @@ def run_part2_cube(cfg: Part2Config, tracker_cfg: Part1Config):
             f"Run calibration first: python main.py --part 2 --mode calib"
         )
 
-    ref = cv2.imread(cfg.reference_path)
-    if ref is None:
-        raise FileNotFoundError(f"Could not read: {cfg.reference_path}")
-
-    calib = load_calibration_npz(cfg.calib_output_path)
-    K_calib = np.asarray(calib.K, dtype=np.float64).reshape(3, 3)
-    dist = np.asarray(calib.dist, dtype=np.float64).reshape(-1, 1)  # always (N,1)
+    ref = _read_image_or_raise(cfg.reference_path)
 
     cap = cv2.VideoCapture(cfg.video_path)
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open: {cfg.video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    out_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    out_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps, out_w, out_h = _video_props(cap)
+    K, dist = _load_K_dist_for_video(cfg.calib_output_path, out_w, out_h)
 
-    # Scale K if calibration resolution differs from the video resolution.
-    K = K_calib
-    if calib.image_size != (out_w, out_h):
-        K = scale_K_to_new_size(K_calib, calib.image_size, (out_w, out_h))
-    K = np.asarray(K, dtype=np.float64).reshape(3, 3)
-
-    # Plane dimensions in world units (Z=0).
-    ref_h, ref_w = ref.shape[:2]
-    ref_aspect = ref_h / float(ref_w)
-    plane_w = float(cfg.plane_width)
-    plane_h = float(cfg.plane_width) * ref_aspect
+    plane_w, plane_h = _plane_w_h_from_reference(ref, cfg.plane_width)
 
     obj_plane = np.ascontiguousarray(make_plane_object_points(plane_w, plane_h), dtype=np.float64).reshape(-1, 3)
     cube_3d = make_cube_points(
@@ -191,22 +216,8 @@ def run_part2_cube(cfg: Part2Config, tracker_cfg: Part1Config):
             if img_pts.shape != (4, 2) or not np.isfinite(img_pts).all():
                 pass
             else:
-                try:
-                    ok_pnp = False
-                    if hasattr(cv2, "SOLVEPNP_IPPE"):
-                        try:
-                            ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=int(cv2.SOLVEPNP_IPPE))
-                        except cv2.error:
-                            ok_pnp = False
-
-                        if not ok_pnp:
-                            ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=int(cv2.SOLVEPNP_ITERATIVE))
-                    else:
-                        ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=int(cv2.SOLVEPNP_ITERATIVE))
-                except cv2.error:
-                    ok_pnp = False
-
-                if ok_pnp:
+                ok_pnp, rvec, tvec = _solve_pnp_ippe_fallback(obj_plane, img_pts, K, dist)
+                if ok_pnp and rvec is not None and tvec is not None:
                     pose_ok += 1
                     imgpts, _ = cv2.projectPoints(cube_3d, rvec, tvec, K, dist)
                     out = draw_cube(out, imgpts.reshape(-1, 2))
@@ -245,32 +256,15 @@ def run_part3_model(cfg: Part3Config, tracker_cfg: Part1Config):
             f"Run Part 2 calibration first: python main.py --part 2 --mode calib"
         )
 
-    ref = cv2.imread(cfg.reference_path)
-    if ref is None:
-        raise FileNotFoundError(f"Could not read: {cfg.reference_path}")
-
-    calib = load_calibration_npz(cfg.calib_output_path)
-    K_calib = np.asarray(calib.K, dtype=np.float64).reshape(3, 3)
-    dist = np.asarray(calib.dist, dtype=np.float64).reshape(-1, 1)
+    ref = _read_image_or_raise(cfg.reference_path)
 
     cap = cv2.VideoCapture(cfg.video_path)
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open: {cfg.video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    out_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    out_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    K = K_calib
-    if calib.image_size != (out_w, out_h):
-        K = scale_K_to_new_size(K_calib, calib.image_size, (out_w, out_h))
-    K = np.asarray(K, dtype=np.float64).reshape(3, 3)
-
-    # Plane dimensions
-    ref_h, ref_w = ref.shape[:2]
-    ref_aspect = ref_h / float(ref_w)
-    plane_w = float(cfg.plane_width)
-    plane_h = float(cfg.plane_width) * ref_aspect
+    fps, out_w, out_h = _video_props(cap)
+    K, dist = _load_K_dist_for_video(cfg.calib_output_path, out_w, out_h)
+    plane_w, plane_h = _plane_w_h_from_reference(ref, cfg.plane_width)
     obj_plane = np.ascontiguousarray(make_plane_object_points(plane_w, plane_h), dtype=np.float64).reshape(-1, 3)
 
     # Load mesh (or demo)
@@ -321,22 +315,8 @@ def run_part3_model(cfg: Part3Config, tracker_cfg: Part1Config):
         if corners is not None:
             img_pts = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
             if img_pts.shape == (4, 2) and np.isfinite(img_pts).all():
-                try:
-                    ok_pnp = False
-                    if hasattr(cv2, "SOLVEPNP_IPPE"):
-                        try:
-                            ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=int(cv2.SOLVEPNP_IPPE))
-                        except cv2.error:
-                            ok_pnp = False
-
-                        if not ok_pnp:
-                            ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=int(cv2.SOLVEPNP_ITERATIVE))
-                    else:
-                        ok_pnp, rvec, tvec = cv2.solvePnP(obj_plane, img_pts, K, dist, flags=int(cv2.SOLVEPNP_ITERATIVE))
-                except cv2.error:
-                    ok_pnp = False
-
-                if ok_pnp:
+                ok_pnp, rvec, tvec = _solve_pnp_ippe_fallback(obj_plane, img_pts, K, dist)
+                if ok_pnp and rvec is not None and tvec is not None:
                     pose_ok += 1
                     proj, _ = cv2.projectPoints(v_plane, rvec, tvec, K, dist)
                     verts2d = proj.reshape(-1, 2)
@@ -395,33 +375,15 @@ def run_part4_occlusion(cfg: Part4Config, tracker_cfg: Part1Config):
             f"Run Part 2 calibration first: python main.py --part 2 --mode calib"
         )
 
-    ref = cv2.imread(cfg.reference_path)
-    if ref is None:
-        raise FileNotFoundError(f"Could not read: {cfg.reference_path}")
-
-    calib = load_calibration_npz(cfg.calib_output_path)
-    K_calib = np.asarray(calib.K, dtype=np.float64).reshape(3, 3)
-    dist = np.asarray(calib.dist, dtype=np.float64).reshape(-1, 1)
+    ref = _read_image_or_raise(cfg.reference_path)
 
     cap = cv2.VideoCapture(cfg.video_path)
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open: {cfg.video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    out_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    out_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    # Scale intrinsics if needed
-    K = K_calib
-    if tuple(calib.image_size) != (out_w, out_h):
-        K = scale_K_to_new_size(K_calib, tuple(calib.image_size), (out_w, out_h))
-    K = np.asarray(K, dtype=np.float64).reshape(3, 3)
-
-    # Plane object points (Z=0)
-    ref_h, ref_w = ref.shape[:2]
-    ref_aspect = ref_h / float(ref_w)
-    plane_w = float(cfg.plane_width)
-    plane_h = float(cfg.plane_width) * ref_aspect
+    fps, out_w, out_h = _video_props(cap)
+    K, dist = _load_K_dist_for_video(cfg.calib_output_path, out_w, out_h)
+    plane_w, plane_h = _plane_w_h_from_reference(ref, cfg.plane_width)
     obj_plane = np.ascontiguousarray(make_plane_object_points(plane_w, plane_h), dtype=np.float64).reshape(-1, 3)
 
     # Load mesh + place on plane
