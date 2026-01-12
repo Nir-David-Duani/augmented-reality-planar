@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 
 # Jupyter
-.ipynb_checkpoints/
+*.ipynb
 
 # Data / outputs (do not commit large media)
 data/*
