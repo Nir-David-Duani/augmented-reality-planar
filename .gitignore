@@ -18,5 +18,4 @@ outputs/*
 # Common media files (extra safety)
 *.mp4
 *.mov
-*.MOV
 *.zip
