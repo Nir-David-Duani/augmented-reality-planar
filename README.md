@@ -4,7 +4,7 @@
 [Click here to view the videos (Google Drive)](https://drive.google.com/drive/folders/1Z0hUGtW1wzkdcgsVf_CUyesgSnEFWKU1?usp=drive_link)
 
 ### Project Report
-_Coming soon_ (PDF link will be added here)
+[Click here to view the videos (Google Drive)](https://drive.google.com/file/d/1I1TPNkq9C81W2IA9ZLPm8-R-WemLetJx/view?usp=drive_link)
 
 ---
 
