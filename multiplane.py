@@ -100,6 +100,151 @@ def _alpha_fill_convex_poly(img_bgr: np.ndarray, poly2d: np.ndarray, color_bgr: 
     return out
 
 
+def _alpha_polyline(img_bgr: np.ndarray, pts2d: np.ndarray, color_bgr: tuple[int, int, int], thickness: int, alpha: float) -> np.ndarray:
+    """Draw a polyline with alpha blending (useful for subtle rims/highlights)."""
+    a = float(alpha)
+    if a <= 0.0:
+        return img_bgr
+    a = min(a, 1.0)
+
+    pts = np.asarray(pts2d, dtype=np.int32).reshape(-1, 1, 2)
+    if pts.shape[0] < 3:
+        return img_bgr
+
+    overlay = img_bgr.copy()
+    cv2.polylines(overlay, [pts], True, tuple(int(x) for x in color_bgr), int(thickness), cv2.LINE_AA)
+    return cv2.addWeighted(overlay, a, img_bgr, 1.0 - a, 0.0)
+
+
+def _portal_mask_from_poly(frame_shape_hw: tuple[int, int], poly2d: np.ndarray) -> np.ndarray:
+    """Binary mask (0/255) for a convex polygon in frame coordinates."""
+    h, w = int(frame_shape_hw[0]), int(frame_shape_hw[1])
+    mask = np.zeros((h, w), dtype=np.uint8)
+    pts = np.asarray(poly2d, dtype=np.int32).reshape(-1, 1, 2)
+    if pts.shape[0] >= 3:
+        cv2.fillConvexPoly(mask, pts, 255, lineType=cv2.LINE_AA)
+    return mask
+
+
+def _apply_portal_glass_effect(out_bgr: np.ndarray, mask_u8: np.ndarray, cfg: Part5Config) -> np.ndarray:
+    """
+    Subtle "window glass" overlay inside the portal:
+    - gentle vignette (darken edges)
+    - diagonal reflection highlight (soft, low alpha)
+    """
+    if not bool(getattr(cfg, "portal_glass_enable", True)):
+        return out_bgr
+
+    m = np.asarray(mask_u8, dtype=np.uint8)
+    if m.ndim != 2 or m.size == 0:
+        return out_bgr
+
+    ys, xs = np.where(m > 0)
+    if ys.size < 16:
+        return out_bgr
+
+    y0, y1 = int(ys.min()), int(ys.max())
+    x0, x1 = int(xs.min()), int(xs.max())
+    # Clamp ROI bounds
+    h, w = out_bgr.shape[:2]
+    y0 = max(0, min(y0, h - 1))
+    y1 = max(0, min(y1, h - 1))
+    x0 = max(0, min(x0, w - 1))
+    x1 = max(0, min(x1, w - 1))
+    if y1 <= y0 or x1 <= x0:
+        return out_bgr
+
+    roi = out_bgr[y0 : y1 + 1, x0 : x1 + 1].astype(np.float32)
+    mroi = (m[y0 : y1 + 1, x0 : x1 + 1] > 0)
+
+    H, W = roi.shape[:2]
+    # Normalized coords in ROI (0..1)
+    xv = np.linspace(0.0, 1.0, W, dtype=np.float32)[None, :]
+    yv = np.linspace(0.0, 1.0, H, dtype=np.float32)[:, None]
+
+    # Vignette strength: stronger near edges
+    vig_s = float(getattr(cfg, "portal_glass_vignette_strength", 0.0))
+    if vig_s > 0.0:
+        dx = (xv - 0.5) / 0.5
+        dy = (yv - 0.5) / 0.5
+        r = np.sqrt(dx * dx + dy * dy)
+        vig = np.clip(r, 0.0, 1.0)  # 0 center -> 1 edges
+        # darken factor in [1-vig_s, 1]
+        factor = (1.0 - vig_s * vig).astype(np.float32)
+        for c in range(3):
+            ch = roi[:, :, c]
+            ch[mroi] = ch[mroi] * factor[mroi]
+            roi[:, :, c] = ch
+
+    # Reflection: diagonal ramp (top-left -> bottom-right)
+    ref_s = float(getattr(cfg, "portal_glass_reflection_strength", 0.0))
+    if ref_s > 0.0:
+        ramp = np.clip(1.0 - (0.75 * xv + 0.95 * yv), 0.0, 1.0).astype(np.float32)
+        k = int(getattr(cfg, "portal_glass_reflection_blur_ksize", 0))
+        if k and k > 1:
+            if k % 2 == 0:
+                k += 1
+            ramp = cv2.GaussianBlur(ramp, (k, k), 0.0)
+
+        tint = np.asarray(getattr(cfg, "portal_glass_tint_bgr", (255, 255, 255)), dtype=np.float32).reshape(1, 1, 3)
+        a = (ref_s * ramp).astype(np.float32)
+        a3 = a[:, :, None]
+        # blend only inside mask
+        roi[mroi] = (1.0 - a3[mroi]) * roi[mroi] + a3[mroi] * tint
+
+    out = out_bgr.copy()
+    out[y0 : y1 + 1, x0 : x1 + 1] = np.clip(roi, 0, 255).astype(np.uint8)
+    return out
+
+
+def _draw_portal_window_rim(out_bgr: np.ndarray, border_pts2d: np.ndarray, cfg: Part5Config) -> np.ndarray:
+    """
+    Thin "window rim" styling (not thick):
+    - subtle shadow offset
+    - thin dark outer rim
+    - thin bright inner rim with alpha
+    """
+    if not bool(getattr(cfg, "portal_window_style", True)):
+        # keep legacy border if user wants it
+        return out_bgr
+
+    pts = np.asarray(border_pts2d, dtype=np.float32).reshape(-1, 2)
+    if pts.shape[0] < 3 or (not np.isfinite(pts).all()):
+        return out_bgr
+
+    shadow_alpha = float(getattr(cfg, "portal_shadow_alpha", 0.0))
+    if shadow_alpha > 0.0:
+        dx = float(getattr(cfg, "portal_shadow_dx", 2))
+        dy = float(getattr(cfg, "portal_shadow_dy", 3))
+        sh_pts = pts + np.array([dx, dy], dtype=np.float32)
+        out_bgr = _alpha_polyline(
+            out_bgr,
+            sh_pts,
+            tuple(getattr(cfg, "portal_shadow_bgr", (0, 0, 0))),
+            thickness=int(getattr(cfg, "portal_rim_outer_thickness", 2)),
+            alpha=shadow_alpha,
+        )
+
+    # Outer rim (thin)
+    out_bgr = _alpha_polyline(
+        out_bgr,
+        pts,
+        tuple(getattr(cfg, "portal_rim_outer_bgr", (10, 10, 10))),
+        thickness=int(getattr(cfg, "portal_rim_outer_thickness", 2)),
+        alpha=1.0,
+    )
+
+    # Inner rim (thin, semi-transparent)
+    out_bgr = _alpha_polyline(
+        out_bgr,
+        pts,
+        tuple(getattr(cfg, "portal_rim_inner_bgr", (230, 255, 255))),
+        thickness=int(getattr(cfg, "portal_rim_inner_thickness", 1)),
+        alpha=float(getattr(cfg, "portal_rim_inner_alpha", 0.55)),
+    )
+    return out_bgr
+
+
 def _lerp2(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
     return (1.0 - float(t)) * a + float(t) * b
 
@@ -315,6 +460,255 @@ def _render_portal_from_equirect_sphere(
     return tex
 
 
+def _wrap_repeat01(x: np.ndarray) -> np.ndarray:
+    """Wrap values into [0,1) for texture repeat mapping."""
+    return x - np.floor(x)
+
+
+def _sample_texture_repeat(tex_bgr: np.ndarray, u01: np.ndarray, v01: np.ndarray, *, repeat: float = 1.0) -> np.ndarray:
+    """
+    Sample a BGR texture using normalized UV in [0,1] with optional repeat.
+    Uses bilinear sampling via cv2.remap.
+    """
+    h, w = tex_bgr.shape[:2]
+    if h < 2 or w < 2:
+        return np.zeros((u01.shape[0], u01.shape[1], 3), dtype=np.uint8)
+
+    rep = float(repeat)
+    if rep <= 0.0:
+        rep = 1.0
+
+    uu = _wrap_repeat01(u01 * rep)
+    vv = _wrap_repeat01(v01 * rep)
+
+    map_x = (uu * (w - 1)).astype(np.float32)
+    map_y = (vv * (h - 1)).astype(np.float32)
+
+    return cv2.remap(tex_bgr, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
+
+
+def _render_portal_room_box(
+    wall_tex_bgr: np.ndarray,
+    C_obj: np.ndarray,
+    *,
+    portal_w: float,
+    portal_h: float,
+    out_size: int,
+    depth: float,
+    room_scale: float,
+    cam_backoff: float,
+    tex_repeat: float = 1.0,
+) -> np.ndarray:
+    """
+    Render a REAL 3D "room" behind the portal plane (Z=0) using ray-box intersections.
+
+    World (object) coords:
+      - Portal plane is Z=0.
+      - The room extends behind the portal towards negative Z.
+      - The room is a rectangular box:
+          x in [-W/2, W/2], y in [-H/2, H/2], z in [-D, 0]
+
+    Rays:
+      For each portal pixel we pick a point P on the portal plane and cast a ray
+      from a virtual camera behind the portal (C_virt) through P into the room.
+    """
+    out_size = int(out_size)
+    if out_size <= 32:
+        out_size = 32
+
+    D = float(depth)
+    if D <= 1e-6:
+        D = 1.0
+
+    s = float(room_scale)
+    if s <= 1e-3:
+        s = 1.0
+
+    # Room dimensions (slightly larger than the portal)
+    W = float(portal_w) * s
+    H = float(portal_h) * s
+    hw = 0.5 * W
+    hh = 0.5 * H
+
+    # Virtual camera behind the portal:
+    # - reflect camera across plane (z -> -z)
+    # - then push it further behind by cam_backoff
+    C = np.asarray(C_obj, dtype=np.float64).reshape(3)
+    Cz = -float(C[2])
+    Cz -= float(cam_backoff)
+    Cvirt = np.array([float(C[0]), float(C[1]), Cz], dtype=np.float64)
+
+    # Grid of points on portal plane (Z=0), centered.
+    if out_size not in _PORTAL_GRID_CACHE:
+        xsn = np.linspace(-0.5, 0.5, out_size, dtype=np.float32)
+        ysn = np.linspace(-0.5, 0.5, out_size, dtype=np.float32)
+        Xn, Yn = np.meshgrid(xsn, ysn)
+        _PORTAL_GRID_CACHE[out_size] = (Xn, Yn)
+    Xn, Yn = _PORTAL_GRID_CACHE[out_size]
+    X = (Xn * float(portal_w)).astype(np.float64, copy=False)
+    Y = (Yn * float(portal_h)).astype(np.float64, copy=False)
+    P = np.stack([X, Y, np.zeros_like(X)], axis=-1)  # (H,W,3)
+
+    # Ray directions d = normalize(P - Cvirt)
+    d = P - Cvirt.reshape(1, 1, 3)
+    dn = np.linalg.norm(d, axis=2, keepdims=True)
+    d = d / (dn + 1e-9)
+
+    # Helper to compute intersection t for plane axis=value
+    def t_for_plane(axis: int, value: float) -> np.ndarray:
+        denom = d[:, :, axis]
+        numer = (value - Cvirt[axis])
+        t = numer / (denom + 1e-9)
+        return t
+
+    # Candidate intersections with 6 planes
+    t_back = t_for_plane(2, -D)      # z = -D
+    t_front = t_for_plane(2, 0.0)    # z = 0 (should be ~ on portal plane)
+    t_left = t_for_plane(0, -hw)     # x = -W/2
+    t_right = t_for_plane(0, hw)     # x = +W/2
+    t_bottom = t_for_plane(1, -hh)   # y = -H/2
+    t_top = t_for_plane(1, hh)       # y = +H/2
+
+    # Compute hit points for each plane
+    def hit_point(t: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        hx = Cvirt[0] + t * d[:, :, 0]
+        hy = Cvirt[1] + t * d[:, :, 1]
+        hz = Cvirt[2] + t * d[:, :, 2]
+        return hx, hy, hz
+
+    bx, by, bz = hit_point(t_back)
+    lx, ly, lz = hit_point(t_left)
+    rx, ry, rz = hit_point(t_right)
+    tx, ty, tz = hit_point(t_top)
+    fx, fy, fz = hit_point(t_bottom)
+
+    # Validity masks (hit point within the face bounds) and t>0
+    eps = 1e-6
+    valid_back = (t_back > eps) & (np.abs(bx) <= hw + 1e-6) & (np.abs(by) <= hh + 1e-6)
+    valid_left = (t_left > eps) & (lz <= 0.0 + 1e-6) & (lz >= -D - 1e-6) & (np.abs(ly) <= hh + 1e-6)
+    valid_right = (t_right > eps) & (rz <= 0.0 + 1e-6) & (rz >= -D - 1e-6) & (np.abs(ry) <= hh + 1e-6)
+    valid_top = (t_top > eps) & (tz <= 0.0 + 1e-6) & (tz >= -D - 1e-6) & (np.abs(tx) <= hw + 1e-6)
+    valid_bottom = (t_bottom > eps) & (fz <= 0.0 + 1e-6) & (fz >= -D - 1e-6) & (np.abs(fx) <= hw + 1e-6)
+
+    # Pick nearest valid intersection among {back,left,right,top,bottom}
+    t_inf = np.full((out_size, out_size), 1e12, dtype=np.float64)
+    t_best = t_inf.copy()
+    face = np.full((out_size, out_size), -1, dtype=np.int8)  # 0 back, 1 left, 2 right, 3 top, 4 bottom
+
+    def consider(t: np.ndarray, valid: np.ndarray, face_id: int):
+        nonlocal t_best, face
+        t_use = np.where(valid, t, t_inf)
+        sel = t_use < t_best
+        t_best = np.where(sel, t_use, t_best)
+        face = np.where(sel, np.int8(face_id), face)
+
+    consider(t_back, valid_back, 0)
+    consider(t_left, valid_left, 1)
+    consider(t_right, valid_right, 2)
+    consider(t_top, valid_top, 3)
+    consider(t_bottom, valid_bottom, 4)
+
+    # Compute final hit point
+    hx, hy, hz = hit_point(t_best)
+
+    # UV mapping per face into the wall texture (normalized 0..1)
+    u = np.zeros((out_size, out_size), dtype=np.float32)
+    v = np.zeros((out_size, out_size), dtype=np.float32)
+
+    # back face: u=x, v=y
+    sel = face == 0
+    if np.any(sel):
+        u[sel] = ((hx[sel] + hw) / (W + 1e-9)).astype(np.float32)
+        v[sel] = ((hy[sel] + hh) / (H + 1e-9)).astype(np.float32)
+
+    # left face (x=-hw): u=z depth, v=y
+    sel = face == 1
+    if np.any(sel):
+        u[sel] = ((-hz[sel]) / (D + 1e-9)).astype(np.float32)
+        v[sel] = ((hy[sel] + hh) / (H + 1e-9)).astype(np.float32)
+
+    # right face (x=+hw)
+    sel = face == 2
+    if np.any(sel):
+        u[sel] = ((-hz[sel]) / (D + 1e-9)).astype(np.float32)
+        v[sel] = ((hy[sel] + hh) / (H + 1e-9)).astype(np.float32)
+
+    # top face (y=+hh): u=x, v=z
+    sel = face == 3
+    if np.any(sel):
+        u[sel] = ((hx[sel] + hw) / (W + 1e-9)).astype(np.float32)
+        v[sel] = ((-hz[sel]) / (D + 1e-9)).astype(np.float32)
+
+    # bottom face (y=-hh)
+    sel = face == 4
+    if np.any(sel):
+        u[sel] = ((hx[sel] + hw) / (W + 1e-9)).astype(np.float32)
+        v[sel] = ((-hz[sel]) / (D + 1e-9)).astype(np.float32)
+
+    # For pixels with no valid hit, return black
+    ok = face >= 0
+    if not ok.any():
+        return np.zeros((out_size, out_size, 3), dtype=np.uint8)
+
+    # Clamp UV to [0,1] then sample with optional repeat
+    u01 = np.clip(u, 0.0, 1.0)
+    v01 = np.clip(v, 0.0, 1.0)
+    tex = _sample_texture_repeat(wall_tex_bgr, u01, v01, repeat=float(tex_repeat))
+
+    # Zero out invalid pixels
+    tex[~ok] = 0
+    return tex
+
+
+def _make_centered_rect_points_z(w: float, h: float, z: float) -> np.ndarray:
+    """4 corners of a centered rectangle on plane z=constant (object coords)."""
+    hw = 0.5 * float(w)
+    hh = 0.5 * float(h)
+    zz = float(z)
+    return np.array(
+        [
+            [-hw, -hh, zz],
+            [hw, -hh, zz],
+            [hw, hh, zz],
+            [-hw, hh, zz],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _render_portal_backwall_texture(
+    frame_bgr: np.ndarray,
+    texture_bgr: np.ndarray,
+    *,
+    portal_ellipse2d: np.ndarray,
+    backwall_quad2d: np.ndarray,
+    alpha: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Render a textured back wall quad and clip it by an ellipse portal mask.
+    Returns (out_frame, ellipse_mask_u8).
+    """
+    # Ellipse mask in frame coords (fill polygon approximating ellipse curve)
+    ell2d = np.asarray(portal_ellipse2d, dtype=np.float64).reshape(-1, 2)
+    if ell2d.shape[0] < 12 or (not np.isfinite(ell2d).all()):
+        return frame_bgr, np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
+
+    ell_mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(ell_mask, [np.int32(ell2d).reshape(-1, 1, 2)], 255, lineType=cv2.LINE_AA)
+
+    quad = np.asarray(backwall_quad2d, dtype=np.float64).reshape(4, 2)
+    if quad.shape != (4, 2) or (not np.isfinite(quad).all()):
+        return frame_bgr, ell_mask
+
+    # Limit blending to ellipse AND backwall quad area
+    quad_mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
+    cv2.fillConvexPoly(quad_mask, np.int32(quad), 255, lineType=cv2.LINE_AA)
+    frame_mask = cv2.bitwise_and(ell_mask, quad_mask)
+
+    out = _warp_texture_onto_quad_with_frame_mask(frame_bgr, texture_bgr, quad, frame_mask, alpha=float(alpha))
+    return out, ell_mask
+
+
 def _draw_plane_outline_corners_stripes(
     img_bgr: np.ndarray,
     corners2d: np.ndarray,
@@ -426,6 +820,8 @@ class PlaneTracker:
         self._hold_left: int = 0
         self._last_corners_img_raw: Optional[np.ndarray] = None   # (4,2) float, from homography (unsmoothed)
         self._last_corners_img_draw: Optional[np.ndarray] = None  # (4,2) float, smoothed for drawing
+        self._stable_count: int = 0
+        self._was_visible: bool = False
 
         # Debug stats
         self.good = 0
@@ -537,7 +933,15 @@ class PlaneTracker:
             self._tvec = (a_p * self._tvec + (1.0 - a_p) * t_new).astype(np.float64)
 
         self._hold_left = int(getattr(self.cfg, "max_hold_frames", 0))
-        return PlanePose(rvec=self._rvec, tvec=self._tvec, visible=True, held=False)
+
+        # Visibility gating: require N consecutive good frames before showing.
+        min_vis = int(getattr(self.cfg, "min_visible_frames", 1))
+        if min_vis < 1:
+            min_vis = 1
+        self._stable_count = min(self._stable_count + 1, 1000000)
+        visible_now = self._stable_count >= min_vis
+        self._was_visible = bool(visible_now)
+        return PlanePose(rvec=self._rvec, tvec=self._tvec, visible=visible_now, held=False)
 
     def _maybe_hold(self) -> PlanePose:
         max_hold = int(getattr(self.cfg, "max_hold_frames", 0))
@@ -548,7 +952,12 @@ class PlaneTracker:
             and self._hold_left > 0
         ):
             self._hold_left -= 1
-            return PlanePose(rvec=self._rvec, tvec=self._tvec, visible=True, held=True)
+            # Keep visibility only if it was already stable/visible before.
+            return PlanePose(rvec=self._rvec, tvec=self._tvec, visible=bool(self._was_visible), held=True)
+
+        # Hard reset on failure (prevents flicker/jumps when target leaves view)
+        self._stable_count = 0
+        self._was_visible = False
         return PlanePose(rvec=np.zeros((3, 1), dtype=np.float64), tvec=np.zeros((3, 1), dtype=np.float64), visible=False, held=False)
 
     def last_corners_img(self) -> Optional[np.ndarray]:
@@ -746,50 +1155,43 @@ def export_part5_video(
                 portal_shape = "rect"
 
             if pano is not None:
-                C_obj = _camera_center_in_object(pose.rvec, pose.tvec)
-                fov = float(getattr(cfg2, "portal_env_fov_scale", 1.0))
-                if bool(getattr(cfg2, "portal_env_fov_adaptive", False)):
-                    # If the camera is far from the plane (Z=0), the portal covers a tiny angular FOV (zoom-in).
-                    # Scale sampling window roughly proportional to distance-from-plane to keep a stable view.
-                    ref_d = float(getattr(cfg2, "portal_env_fov_ref_distance", 1.0))
-                    if ref_d <= 1e-6:
-                        ref_d = 1.0
-                    d = float(abs(C_obj[2]))  # distance to plane along plane normal in object coords
-                    fov *= max(1.0, d / ref_d)
-                tex = _render_portal_from_equirect_sphere(
-                    pano,
-                    C_obj,
-                    portal_w=plane.portal_w * fov,
-                    portal_h=plane.portal_h * fov,
-                    out_size=int(getattr(cfg2, "portal_tex_size", 384)),
-                    sphere_radius=float(getattr(cfg2, "portal_env_sphere_radius", 3.0)),
-                )
+                # Back-wall portal ONLY: ellipse mask + single textured back wall quad.
+                if portal_shape != "ellipse":
+                    portal_shape = "ellipse"
+
+                ell2d = plane.project_portal_ellipse(pose.rvec, pose.tvec, K, dist)
+                if ell2d.shape[0] < 12 or (not np.isfinite(ell2d).all()):
+                    continue
+
+                bw = float(getattr(cfg2, "portal_backwall_size_frac", 0.85)) * float(plane.portal_w)
+                bh = float(getattr(cfg2, "portal_backwall_size_frac", 0.85)) * float(plane.portal_h)
+                depth = float(getattr(cfg2, "portal_backwall_depth", 0.25))
+                obj_back = _make_centered_rect_points_z(bw, bh, z=-abs(depth))
+
+                back2d, _ = cv2.projectPoints(obj_back, pose.rvec, pose.tvec, K, dist)
+                back2d = back2d.reshape(-1, 2)
+
                 k = int(getattr(cfg2, "portal_env_blur_ksize", 0))
+                tex = pano
                 if k and k > 1:
-                    if k % 2 == 0:
-                        k += 1
-                    tex = cv2.GaussianBlur(tex, (k, k), 0.0)
-                # Optional unsharp mask to make portals more readable.
+                    kk = int(k)
+                    if kk % 2 == 0:
+                        kk += 1
+                    tex = cv2.GaussianBlur(tex, (kk, kk), 0.0)
                 sharp = float(getattr(cfg2, "portal_env_sharpen_amount", 0.0))
                 if sharp > 0.0:
                     blur = cv2.GaussianBlur(tex, (0, 0), 1.0)
                     tex = np.clip((1.0 + sharp) * tex.astype(np.float32) - sharp * blur.astype(np.float32), 0, 255).astype(np.uint8)
 
-                if portal_shape == "ellipse":
-                    # Mask in frame coordinates based on projected ellipse (correct perspective).
-                    # If projection is invalid for this frame, skip drawing this portal (no rectangle fallback).
-                    ell2d = plane.project_portal_ellipse(pose.rvec, pose.tvec, K, dist)
-                    if ell2d.shape[0] < 12 or (not np.isfinite(ell2d).all()):
-                        continue
-                    mask = np.zeros(out.shape[:2], dtype=np.uint8)
-                    cv2.fillPoly(mask, [np.int32(ell2d).reshape(-1, 1, 2)], 255, lineType=cv2.LINE_AA)
-                    out = _warp_texture_onto_quad_with_frame_mask(out, tex, portal2d, mask, alpha=float(cfg2.portal_alpha))
-                    # Border: ellipse curve
-                    cv2.polylines(out, [np.int32(ell2d).reshape(-1, 1, 2)], True, cfg2.portal_border_bgr, int(cfg2.portal_border_thickness), cv2.LINE_AA)
-                else:
-                    out = _warp_texture_onto_quad(out, tex, portal2d, alpha=float(cfg2.portal_alpha))
-                    # Border/frame: quad
-                    cv2.polylines(out, [np.int32(portal2d).reshape(-1, 1, 2)], True, cfg2.portal_border_bgr, int(cfg2.portal_border_thickness), cv2.LINE_AA)
+                out, ell_mask = _render_portal_backwall_texture(
+                    out,
+                    tex,
+                    portal_ellipse2d=ell2d,
+                    backwall_quad2d=back2d,
+                    alpha=float(getattr(cfg2, "portal_backwall_alpha", cfg2.portal_alpha)),
+                )
+                out = _apply_portal_glass_effect(out, ell_mask, cfg2)
+                out = _draw_portal_window_rim(out, ell2d, cfg2)
             else:
                 if portal_shape == "ellipse":
                     ell2d = plane.project_portal_ellipse(pose.rvec, pose.tvec, K, dist)
@@ -805,10 +1207,13 @@ def export_part5_video(
                         out_f = out.astype(np.float32)
                         out_f[idx] = a * col + (1.0 - a) * out_f[idx]
                         out = out_f.astype(np.uint8)
-                    cv2.polylines(out, [np.int32(ell2d).reshape(-1, 1, 2)], True, cfg2.portal_border_bgr, int(cfg2.portal_border_thickness), cv2.LINE_AA)
+                    out = _apply_portal_glass_effect(out, mask, cfg2)
+                    out = _draw_portal_window_rim(out, ell2d, cfg2)
                 else:
                     out = _alpha_fill_convex_poly(out, portal2d, cfg2.portal_fill_bgr, alpha=float(cfg2.portal_alpha))
-                    cv2.polylines(out, [np.int32(portal2d).reshape(-1, 1, 2)], True, cfg2.portal_border_bgr, int(cfg2.portal_border_thickness), cv2.LINE_AA)
+                    mask = _portal_mask_from_poly(out.shape[:2], portal2d)
+                    out = _apply_portal_glass_effect(out, mask, cfg2)
+                    out = _draw_portal_window_rim(out, portal2d, cfg2)
                 if bool(use_env_portals):
                     # Helpful visual cue: env missing
                     c = portal2d.mean(axis=0)

@@ -55,7 +55,7 @@ class Part1Config:
     # --- Tracking stability (temporal) ---
     # Exponential smoothing on the *projected 4 corners* (more stable than smoothing H directly).
     # 0.0 disables smoothing. Typical: 0.6–0.85 (higher = smoother, more lag).
-    corner_smoothing_alpha: float = 0.60
+    corner_smoothing_alpha: float = 0.05
 
     # If tracking fails on a frame (too few matches/inliers), reuse the last good pose for a
     # few frames to avoid flicker/jumps.
@@ -218,37 +218,67 @@ class Part5Config:
     # Prefer SIFT when available; ORB is the fallback option (no deep learning).
     feature_type: str = "SIFT"  # "SIFT" or "ORB"
     ratio_test: float = 0.72
-    min_matches: int = 30
+    min_matches: int = 20
 
     # Homography / RANSAC
-    ransac_reproj_thresh: float = 3.5
+    ransac_reproj_thresh: float = 4.0
     min_inliers: int = 20
     homography_method: str = "RANSAC"
     refine_homography_with_inliers: bool = True
 
     # Tracking stability
-    max_hold_frames: int = 3
+    # Do NOT hold stale poses when planes leave the view.
+    max_hold_frames: int = 0
+    # Require N consecutive valid frames before showing a plane/portal.
+    # Helps avoid flicker and false-positive jumps when the target is not fully visible.
+    min_visible_frames: int = 2
     # Exponential smoothing (0 disables; higher = smoother, more lag)
-    outline_smoothing_alpha: float = 0.60  # smooth homography quad used for drawing
-    pose_smoothing_alpha: float = 0.50     # smooth (rvec,tvec) used for portal rendering
+    outline_smoothing_alpha: float = 0.40  # smooth homography quad used for drawing
+    pose_smoothing_alpha: float = 0.25     # smooth (rvec,tvec) used for portal rendering
 
     # Plane scale in "world units"
     plane_width: float = 1.0
 
     # Portal visualization (Variant A)
     portal_shape: str = "ellipse"  # "rect" or "ellipse"
-    portal_size_frac: float = 0.50  # ~50% of plane dimensions
+    portal_size_frac: float = 0.60  # ~60% of plane dimensions
     portal_fill_bgr: tuple[int, int, int] = (40, 40, 200)
     portal_border_bgr: tuple[int, int, int] = (0, 255, 255)
     portal_border_thickness: int = 6
     portal_alpha: float = 0.90
     portal_tex_size: int = 1000  # portal texture resolution (square) for portal360
-    portal_env_sphere_radius: float = 20.0  # keep camera inside sphere -> stable portal360; larger = weaker parallax
     portal_env_blur_ksize: int = 0  # optional blur to hide remap aliasing (0 disables)
-    portal_env_fov_scale: float = 6.5  # base zoom OUT factor (bigger = see more)
-    portal_env_fov_adaptive: bool = True  # adapt FOV to camera distance from the plane (reduces zoom-in)
-    portal_env_fov_ref_distance: float = 1.0  # world-units: distance where adaptive factor==1
     portal_env_sharpen_amount: float = 0.7  # 0 disables; try 0.3–1.0
+
+    # --- Back-wall portal (only mode used in Part 5) ---
+    # Ellipse portal mask + a SINGLE textured back wall rectangle at z = -depth.
+    portal_backwall_depth: float = 0.20      # world units behind the plane (typical 0.2–0.3)
+    portal_backwall_size_frac: float = 1.75  # back wall size relative to portal (1.0 fills portal)
+    portal_backwall_alpha: float = 0.95       # blend strength for the back wall texture
+
+    # --- Portal "window" styling (thin rim + subtle glass reflection) ---
+    # Make it feel like a real window to another world (not a chunky border).
+    portal_window_style: bool = True
+
+    # Thin rim (drawn on top of the portal content)
+    portal_rim_outer_bgr: tuple[int, int, int] = (10, 10, 10)        # dark outer rim
+    portal_rim_inner_bgr: tuple[int, int, int] = (230, 255, 255)     # bright inner rim (slight cyan)
+    portal_rim_outer_thickness: int = 2
+    portal_rim_inner_thickness: int = 1
+    portal_rim_inner_alpha: float = 0.55
+
+    # Subtle drop shadow for depth
+    portal_shadow_bgr: tuple[int, int, int] = (0, 0, 0)
+    portal_shadow_alpha: float = 0.22
+    portal_shadow_dx: int = 2
+    portal_shadow_dy: int = 3
+
+    # Glass-like overlay inside the portal (applied after texture warp / fill)
+    portal_glass_enable: bool = True
+    portal_glass_vignette_strength: float = 0.18     # darken near edges (0 disables)
+    portal_glass_reflection_strength: float = 0.22   # diagonal highlight (0 disables)
+    portal_glass_reflection_blur_ksize: int = 11     # odd; 0 disables
+    portal_glass_tint_bgr: tuple[int, int, int] = (255, 255, 255)    # white-ish reflection tint
 
     # Debug / UI
     draw_plane_outline: bool = True
