@@ -1,5 +1,13 @@
 ## Planar Augmented Reality (Computer Vision Project)
+---
 
+**Occlusion handling (foreground masking):**  
+<img src="docs/images/occlusion.gif" width="600">
+
+**Multi-plane tracking with portals:**  
+<img src="docs/images/multiplane.gif" width="600">
+
+---
 ### Video Results
 [Click here to view the videos (Google Drive)](https://drive.google.com/drive/folders/1Z0hUGtW1wzkdcgsVf_CUyesgSnEFWKU1?usp=drive_link)
 
