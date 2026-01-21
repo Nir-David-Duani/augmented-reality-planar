@@ -22,9 +22,43 @@ import cv2
 import numpy as np
 
 from config import Part5Config, get_camera_params_from_config
+from pose import solve_planar_pnp_facing_camera
 
 # Small caches to avoid re-allocating large grids every frame.
 _PORTAL_GRID_CACHE: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _project_points_camera_frame(pts3_cam: np.ndarray, K: np.ndarray, dist: np.ndarray) -> np.ndarray:
+    """
+    Project 3D points that are ALREADY in camera coordinates.
+    We still pass dist so distortion is applied consistently.
+    """
+    pts3_cam = np.asarray(pts3_cam, dtype=np.float64).reshape(-1, 3)
+    r0 = np.zeros((3, 1), dtype=np.float64)
+    t0 = np.zeros((3, 1), dtype=np.float64)
+    img, _ = cv2.projectPoints(pts3_cam, r0, t0, K, dist)
+    return img.reshape(-1, 2)
+
+
+def _object_to_camera_points(obj_pts: np.ndarray, rvec: np.ndarray, tvec: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (pts_cam Nx3, R 3x3, t 3,) for object->camera pose."""
+    R, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))
+    t = np.asarray(tvec, dtype=np.float64).reshape(3, 1)
+    P = np.asarray(obj_pts, dtype=np.float64).reshape(-1, 3).T  # 3xN
+    pts_cam = (R @ P + t).T
+    return pts_cam, R, t.reshape(3)
+
+
+def _plane_normal_cam_facing_camera(R: np.ndarray, t_cam: np.ndarray) -> np.ndarray:
+    """
+    Plane normal in camera coordinates (object +Z axis), forced to face the camera.
+    Uses dot(normal, -t) > 0 criterion (all in camera frame).
+    """
+    n = np.asarray(R, dtype=np.float64).reshape(3, 3)[:, 2].reshape(3)
+    to_cam = -np.asarray(t_cam, dtype=np.float64).reshape(3)
+    if float(n.dot(to_cam)) < 0.0:
+        n = -n
+    return n
 
 
 def _imread_any(path: str) -> Optional[np.ndarray]:
@@ -887,32 +921,10 @@ class PlaneTracker:
             curr = np.asarray(self._last_corners_img_raw, dtype=np.float64).reshape(4, 2)
             self._last_corners_img_draw = (a_c * prev + (1.0 - a_c) * curr).astype(np.float64)
 
-        ok_pnp = False
-        try:
-            if hasattr(cv2, "SOLVEPNP_IPPE"):
-                try:
-                    ok_pnp, rvec, tvec = cv2.solvePnP(self.obj_plane, img_pts, K, dist, flags=int(cv2.SOLVEPNP_IPPE))
-                except cv2.error:
-                    ok_pnp = False
-
-                if not ok_pnp:
-                    ok_pnp, rvec, tvec = cv2.solvePnP(
-                        self.obj_plane,
-                        img_pts,
-                        K,
-                        dist,
-                        flags=int(cv2.SOLVEPNP_ITERATIVE),
-                    )
-            else:
-                ok_pnp, rvec, tvec = cv2.solvePnP(
-                    self.obj_plane,
-                    img_pts,
-                    K,
-                    dist,
-                    flags=int(cv2.SOLVEPNP_ITERATIVE),
-                )
-        except cv2.error:
-            ok_pnp = False
+        # Pose (PnP):
+        # For planar targets, IPPE can yield two valid poses (normal in either direction).
+        # We deterministically pick the one whose plane normal faces the camera.
+        ok_pnp, rvec, tvec = solve_planar_pnp_facing_camera(self.obj_plane, img_pts, K, dist, prefer_ippe=True)
 
         if not ok_pnp:
             return self._maybe_hold()
@@ -922,6 +934,27 @@ class PlaneTracker:
         if not (np.isfinite(r_new).all() and np.isfinite(t_new).all()):
             # Guard against rare numerical issues; don't poison the temporal state with NaNs.
             return self._maybe_hold()
+
+        # Optional outlier rejection: if pose "pops" too much in one frame, ignore it.
+        if bool(getattr(self.cfg, "reject_pose_jumps", False)) and (self._rvec is not None) and (self._tvec is not None):
+            try:
+                # Translation jump (world units)
+                dt = float(np.linalg.norm(t_new.reshape(3) - np.asarray(self._tvec, dtype=np.float64).reshape(3)))
+                max_dt = float(getattr(self.cfg, "pose_jump_max_trans", 0.0) or 0.0)
+
+                # Rotation jump (degrees) using relative rotation
+                R_prev, _ = cv2.Rodrigues(np.asarray(self._rvec, dtype=np.float64).reshape(3, 1))
+                R_curr, _ = cv2.Rodrigues(r_new)
+                R_rel = R_prev.T @ R_curr
+                tr = float(np.trace(R_rel))
+                cosang = max(-1.0, min(1.0, (tr - 1.0) * 0.5))
+                ang_deg = float(np.degrees(np.arccos(cosang)))
+                max_ang = float(getattr(self.cfg, "pose_jump_max_rot_deg", 0.0) or 0.0)
+
+                if (max_dt > 0.0 and dt > max_dt) or (max_ang > 0.0 and ang_deg > max_ang):
+                    return self._maybe_hold()
+            except Exception:
+                pass
 
         # Pose smoothing (reduces portal jitter). We smooth in axis-angle space for simplicity.
         a_p = float(getattr(self.cfg, "pose_smoothing_alpha", 0.0))
@@ -974,19 +1007,19 @@ class PlaneTracker:
 
     def project_portal(self, rvec: np.ndarray, tvec: np.ndarray, K: np.ndarray, dist: np.ndarray) -> np.ndarray:
         """Project portal corners (4x3) to image pixels (4x2)."""
-        imgpts, _ = cv2.projectPoints(self.obj_portal, rvec, tvec, K, dist)
-        return imgpts.reshape(-1, 2)
+        pts_cam, _R, _t = _object_to_camera_points(self.obj_portal, rvec, tvec)
+        return _project_points_camera_frame(pts_cam, K, dist)
 
     def project_portal_ellipse(self, rvec: np.ndarray, tvec: np.ndarray, K: np.ndarray, dist: np.ndarray) -> np.ndarray:
         """Project a portal ellipse curve (Nx3) to image pixels (Nx2)."""
-        img, _ = cv2.projectPoints(self._portal_ellipse_pts3, rvec, tvec, K, dist)
-        pts = img.reshape(-1, 2)
+        pts_cam, _R, _t = _object_to_camera_points(self._portal_ellipse_pts3, rvec, tvec)
+        pts = _project_points_camera_frame(pts_cam, K, dist)
         # Leave validation to caller, but keep shape consistent.
         return pts
 
     def project_plane_outline(self, rvec: np.ndarray, tvec: np.ndarray, K: np.ndarray, dist: np.ndarray) -> np.ndarray:
-        imgpts, _ = cv2.projectPoints(self.obj_plane, rvec, tvec, K, dist)
-        return imgpts.reshape(-1, 2)
+        pts_cam, _R, _t = _object_to_camera_points(self.obj_plane, rvec, tvec)
+        return _project_points_camera_frame(pts_cam, K, dist)
 
 
 def run_part5_multiplane(cfg: Part5Config) -> None:
@@ -1009,6 +1042,8 @@ def export_part5_video(
     use_env_portals: bool = False,
     draw_debug_text: bool = False,
     draw_plane_outline: bool = False,
+    start_frame: int = 0,
+    max_frames: int | None = None,
 ) -> None:
     """
     Export helper:
@@ -1037,6 +1072,13 @@ def export_part5_video(
     cap = cv2.VideoCapture(str(vp))
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video: {cfg2.video_path}")
+
+    # Optional: start from a specific frame (useful for notebook preview exports).
+    sf = int(start_frame) if start_frame is not None else 0
+    if sf < 0:
+        sf = 0
+    if sf > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, sf)
 
     out_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     out_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -1083,6 +1125,9 @@ def export_part5_video(
 
     frame_i = 0
     last_vis = 0
+    max_n = None if max_frames is None else int(max_frames)
+    if max_n is not None and max_n <= 0:
+        max_n = None
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -1154,8 +1199,46 @@ def export_part5_video(
             if portal_shape not in ("rect", "ellipse"):
                 portal_shape = "rect"
 
-            if pano is not None:
-                # Back-wall portal ONLY: ellipse mask + single textured back wall quad.
+            # Debug-first option: solid back wall (no texture). Recommended to validate parallax direction.
+            # We support it both with and without env panoramas.
+            if bool(getattr(cfg2, "portal_debug_backwall_solid", False)):
+                # Debug stage: always use ellipse portal for clean parallax sanity checks.
+                ell2d = plane.project_portal_ellipse(pose.rvec, pose.tvec, K, dist)
+                if ell2d.shape[0] < 12 or (not np.isfinite(ell2d).all()):
+                    continue
+
+                bw = float(getattr(cfg2, "portal_backwall_size_frac", 0.85)) * float(plane.portal_w)
+                bh = float(getattr(cfg2, "portal_backwall_size_frac", 0.85)) * float(plane.portal_h)
+                depth = abs(float(getattr(cfg2, "portal_backwall_depth", 0.25)))
+
+                obj_back0 = _make_centered_rect_points_z(bw, bh, z=0.0)
+                back0_cam, R, t_cam = _object_to_camera_points(obj_back0, pose.rvec, pose.tvec)
+                n_cam = _plane_normal_cam_facing_camera(R, t_cam)
+                back_cam = back0_cam + (-n_cam.reshape(1, 3)) * depth
+                back2d = _project_points_camera_frame(back_cam, K, dist)
+
+                portal_mask = np.zeros(out.shape[:2], dtype=np.uint8)
+                cv2.fillPoly(portal_mask, [np.int32(ell2d).reshape(-1, 1, 2)], 255, lineType=cv2.LINE_AA)
+                quad = np.asarray(back2d, dtype=np.float64).reshape(4, 2)
+                quad_mask = np.zeros(out.shape[:2], dtype=np.uint8)
+                cv2.fillConvexPoly(quad_mask, np.int32(quad), 255, lineType=cv2.LINE_AA)
+                frame_mask = cv2.bitwise_and(portal_mask, quad_mask)
+
+                a = float(getattr(cfg2, "portal_backwall_alpha", cfg2.portal_alpha))
+                if a > 0.0:
+                    col = np.array(getattr(cfg2, "portal_debug_backwall_bgr", (40, 40, 40)), dtype=np.float32).reshape(1, 1, 3)
+                    out_f = out.astype(np.float32)
+                    idx = frame_mask > 0
+                    out_f[idx] = a * col + (1.0 - a) * out_f[idx]
+                    out = out_f.astype(np.uint8)
+
+                out = _apply_portal_glass_effect(out, portal_mask, cfg2)
+                out = _draw_portal_window_rim(out, ell2d, cfg2)
+            elif pano is not None:
+                # Best-practice back-wall portal:
+                # - enforce normal facing camera (camera frame)
+                # - build back wall by shifting geometry by (-normal * depth) in camera frame
+                # - no manual parallax hacks; projection alone produces parallax
                 if portal_shape != "ellipse":
                     portal_shape = "ellipse"
 
@@ -1163,14 +1246,28 @@ def export_part5_video(
                 if ell2d.shape[0] < 12 or (not np.isfinite(ell2d).all()):
                     continue
 
+                # Build back-wall quad in camera frame (shift along -normal_cam).
                 bw = float(getattr(cfg2, "portal_backwall_size_frac", 0.85)) * float(plane.portal_w)
                 bh = float(getattr(cfg2, "portal_backwall_size_frac", 0.85)) * float(plane.portal_h)
                 depth = float(getattr(cfg2, "portal_backwall_depth", 0.25))
-                obj_back = _make_centered_rect_points_z(bw, bh, z=-abs(depth))
+                depth = abs(float(depth))
 
-                back2d, _ = cv2.projectPoints(obj_back, pose.rvec, pose.tvec, K, dist)
-                back2d = back2d.reshape(-1, 2)
+                obj_back0 = _make_centered_rect_points_z(bw, bh, z=0.0)  # plane-local, z=0 baseline
+                back0_cam, R, t_cam = _object_to_camera_points(obj_back0, pose.rvec, pose.tvec)
+                n_cam = _plane_normal_cam_facing_camera(R, t_cam)
+                back_cam = back0_cam + (-n_cam.reshape(1, 3)) * depth
+                back2d = _project_points_camera_frame(back_cam, K, dist)
 
+                # Portal mask (ellipse), used for both debug solid and textured back wall.
+                portal_mask = np.zeros(out.shape[:2], dtype=np.uint8)
+                cv2.fillPoly(portal_mask, [np.int32(ell2d).reshape(-1, 1, 2)], 255, lineType=cv2.LINE_AA)
+
+                quad = np.asarray(back2d, dtype=np.float64).reshape(4, 2)
+                quad_mask = np.zeros(out.shape[:2], dtype=np.uint8)
+                cv2.fillConvexPoly(quad_mask, np.int32(quad), 255, lineType=cv2.LINE_AA)
+                frame_mask = cv2.bitwise_and(portal_mask, quad_mask)
+
+                # Texture only AFTER debug stage works.
                 k = int(getattr(cfg2, "portal_env_blur_ksize", 0))
                 tex = pano
                 if k and k > 1:
@@ -1183,14 +1280,14 @@ def export_part5_video(
                     blur = cv2.GaussianBlur(tex, (0, 0), 1.0)
                     tex = np.clip((1.0 + sharp) * tex.astype(np.float32) - sharp * blur.astype(np.float32), 0, 255).astype(np.uint8)
 
-                out, ell_mask = _render_portal_backwall_texture(
+                out = _warp_texture_onto_quad_with_frame_mask(
                     out,
                     tex,
-                    portal_ellipse2d=ell2d,
-                    backwall_quad2d=back2d,
+                    quad,
+                    frame_mask,
                     alpha=float(getattr(cfg2, "portal_backwall_alpha", cfg2.portal_alpha)),
                 )
-                out = _apply_portal_glass_effect(out, ell_mask, cfg2)
+                out = _apply_portal_glass_effect(out, portal_mask, cfg2)
                 out = _draw_portal_window_rim(out, ell2d, cfg2)
             else:
                 if portal_shape == "ellipse":
@@ -1233,6 +1330,8 @@ def export_part5_video(
         writer.write(out)
         frame_i += 1
         last_vis = int(vis_count)
+        if max_n is not None and frame_i >= max_n:
+            break
         if frame_i % 60 == 0:
             print(f"[part5 export] frames={frame_i} visible={last_vis}/3 mode=portal")
 

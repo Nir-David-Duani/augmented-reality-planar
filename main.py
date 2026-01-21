@@ -21,6 +21,7 @@ from ar_render import (
 )
 from multiplane import export_part5_video, run_part5_multiplane
 from occlusion import raw_hsv_mask, clean_binary_mask, dilate_mask, composite_occlusion
+from pose import solve_planar_pnp_facing_camera
 
 
 def _read_image_or_raise(path: str) -> np.ndarray:
@@ -58,19 +59,7 @@ def _plane_w_h_from_reference(ref_bgr: np.ndarray, plane_width: float) -> tuple[
 def _solve_pnp_ippe_fallback(
     obj_pts: np.ndarray, img_pts: np.ndarray, K: np.ndarray, dist: np.ndarray
 ) -> tuple[bool, np.ndarray | None, np.ndarray | None]:
-    try:
-        if hasattr(cv2, "SOLVEPNP_IPPE"):
-            try:
-                ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, dist, flags=int(cv2.SOLVEPNP_IPPE))
-            except cv2.error:
-                ok = False
-            if not ok:
-                ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, dist, flags=int(cv2.SOLVEPNP_ITERATIVE))
-        else:
-            ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, dist, flags=int(cv2.SOLVEPNP_ITERATIVE))
-        return bool(ok), rvec, tvec
-    except cv2.error:
-        return False, None, None
+    return solve_planar_pnp_facing_camera(obj_pts, img_pts, K, dist, prefer_ippe=True)
 
 
 def run_part1(cfg: Part1Config):
@@ -517,6 +506,13 @@ def parse_args():
     p.add_argument("--feature", type=str, default=None, choices=["SIFT", "ORB"], help="Feature type for Part 5.")
     p.add_argument("--part5_mode", type=str, default="portal", choices=["raw", "outline", "portal", "portal360"], help="Part 5 export: raw, outline-only, solid portal, or portal360 (panorama).")
     p.add_argument("--part5_out", type=str, default=None, help="Output video path for Part 5 (optional).")
+    p.add_argument("--part5_debug_solid", action="store_true", help="Part 5: render a solid-color back wall (no textures) to sanity-check parallax direction.")
+    p.add_argument("--part5_backwall_depth", type=float, default=None, help="Part 5: back wall depth behind plane (recommended ~0.2–0.35).")
+    p.add_argument("--part5_backwall_size", type=float, default=None, help="Part 5: back wall size factor relative to portal (increase to hide edges, e.g. 1.8–2.6).")
+    p.add_argument("--part5_pose_smooth", type=float, default=None, help="Part 5: pose smoothing alpha (0..1, higher=smoother).")
+    p.add_argument("--part5_outline_smooth", type=float, default=None, help="Part 5: outline smoothing alpha (0..1, higher=smoother).")
+    p.add_argument("--part5_min_visible", type=int, default=None, help="Part 5: require N consecutive valid frames before showing (reduces flicker).")
+    p.add_argument("--part5_reject_jumps", action="store_true", help="Part 5: reject single-frame pose outliers (reduces popping).")
 
     # Optional Part 2 overrides
     p.add_argument("--calib_glob", type=str, default=None, help="e.g. data/chessboard/*.jpg")
@@ -618,6 +614,10 @@ if __name__ == "__main__":
             homography_method=base5.homography_method,
             refine_homography_with_inliers=base5.refine_homography_with_inliers,
             max_hold_frames=base5.max_hold_frames,
+            min_visible_frames=(args.part5_min_visible if args.part5_min_visible is not None else base5.min_visible_frames),
+            outline_smoothing_alpha=(args.part5_outline_smooth if args.part5_outline_smooth is not None else base5.outline_smoothing_alpha),
+            pose_smoothing_alpha=(args.part5_pose_smooth if args.part5_pose_smooth is not None else base5.pose_smoothing_alpha),
+            reject_pose_jumps=bool(args.part5_reject_jumps),
             plane_width=base5.plane_width,
             portal_size_frac=base5.portal_size_frac,
             portal_fill_bgr=base5.portal_fill_bgr,
@@ -626,6 +626,9 @@ if __name__ == "__main__":
             portal_alpha=base5.portal_alpha,
             draw_plane_outline=base5.draw_plane_outline,
             draw_debug_text=base5.draw_debug_text,
+            portal_debug_backwall_solid=bool(args.part5_debug_solid),
+            portal_backwall_depth=(args.part5_backwall_depth if args.part5_backwall_depth is not None else base5.portal_backwall_depth),
+            portal_backwall_size_frac=(args.part5_backwall_size if args.part5_backwall_size is not None else base5.portal_backwall_size_frac),
         )
         mode = str(args.part5_mode or "portal").lower().strip()
         if mode == "raw":

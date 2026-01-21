@@ -231,10 +231,16 @@ class Part5Config:
     max_hold_frames: int = 0
     # Require N consecutive valid frames before showing a plane/portal.
     # Helps avoid flicker and false-positive jumps when the target is not fully visible.
-    min_visible_frames: int = 2
+    min_visible_frames: int = 3
     # Exponential smoothing (0 disables; higher = smoother, more lag)
     outline_smoothing_alpha: float = 0.40  # smooth homography quad used for drawing
-    pose_smoothing_alpha: float = 0.25     # smooth (rvec,tvec) used for portal rendering
+    pose_smoothing_alpha: float = 0.35     # smooth (rvec,tvec) used for portal rendering
+
+    # Optional outlier rejection: if a single frame produces a huge pose jump, treat it as invalid.
+    # This reduces "popping" at the cost of possibly missing very fast motion.
+    reject_pose_jumps: bool = False
+    pose_jump_max_trans: float = 0.25      # world units
+    pose_jump_max_rot_deg: float = 25.0    # degrees
 
     # Plane scale in "world units"
     plane_width: float = 1.0
@@ -252,9 +258,15 @@ class Part5Config:
 
     # --- Back-wall portal (only mode used in Part 5) ---
     # Ellipse portal mask + a SINGLE textured back wall rectangle at z = -depth.
-    portal_backwall_depth: float = 0.20      # world units behind the plane (typical 0.2–0.3)
-    portal_backwall_size_frac: float = 1.75  # back wall size relative to portal (1.0 fills portal)
-    portal_backwall_alpha: float = 0.95       # blend strength for the back wall texture
+    portal_backwall_depth: float = 0.33     # world units behind the plane (typical 0.2–0.3)
+    portal_backwall_size_frac: float = 1.90  # back wall size relative to portal (1.0 fills portal)
+    portal_backwall_alpha: float = 0.85       # blend strength for the back wall texture
+
+    # Debug: render the back wall as a SOLID color (no texture) to sanity-check depth/parallax direction.
+    # If your portal "moves the wrong way", first fix the plane normal direction (pose disambiguation),
+    # then validate again with this enabled.
+    portal_debug_backwall_solid: bool = False
+    portal_debug_backwall_bgr: tuple[int, int, int] = (40, 40, 40)
 
     # --- Portal "window" styling (thin rim + subtle glass reflection) ---
     # Make it feel like a real window to another world (not a chunky border).
