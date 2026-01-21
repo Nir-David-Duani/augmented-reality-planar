@@ -5,7 +5,7 @@
 <img src="hand.gif" width="280">
 
 **Multi-plane tracking with portals:**  
-<img src="multiplane.gif" width="280">
+<img src="part5_multi_plane_video_portal360vid5.gif" width="280">
 
 ---
 ### Video Results
