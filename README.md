@@ -2,10 +2,10 @@
 ---
 
 **Occlusion handling (foreground masking):**  
-<img src="docs/images/occlusion.gif" width="280">
+<img src="hand.gif" width="280">
 
 **Multi-plane tracking with portals:**  
-<img src="docs/images/multiplane.gif" width="280">
+<img src="multiplane.gif" width="280">
 
 ---
 ### Video Results
